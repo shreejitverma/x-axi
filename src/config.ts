@@ -9,7 +9,7 @@ export interface Config {
   redirect_uri?: string;
 }
 
-/** Fixed, because X matches the registered callback exactly. 127.0.0.1 follows RFC 8252 section 7.3. */
+/** A fixed port and path, because X matches the registered callback exactly. 127.0.0.1 follows RFC 8252 section 7.3. */
 export const DEFAULT_REDIRECT_URI = "http://127.0.0.1:8711/callback";
 
 export function configDir(): string {

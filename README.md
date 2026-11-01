@@ -84,7 +84,7 @@ When it replaces a login for the same account, or the old account is not known b
 After a suspected leak, run `x-axi logout` before `x-axi login`, which revokes the tokens while x-axi still holds them; once they are replaced, only revoking the app at <https://x.com/settings/connected_apps> ends them.
 `login` reads the keystore before it opens the browser, so a missing or locked keystore stops it before any consent, and if the final save still fails it makes the same attempt to revoke and reports the result.
 If X rejects the refresh token, the command fails with `AUTH_REQUIRED` and the stored login is left in place for you to inspect with `auth status` or remove with `logout`; nothing is cleared silently and nothing is retried.
-A rate limit or an unusable answer from the token endpoint is reported as `X_UNAVAILABLE` and changes nothing.
+A network failure, a rate limit, or an unusable answer from the token endpoint is reported as `X_UNAVAILABLE` and changes nothing.
 Error messages have every known token removed before they are printed.
 
 ### Threat model
@@ -115,6 +115,7 @@ Invisible characters are refused except where a language or emoji needs them: ze
 Bidi embeddings, overrides, and isolates are always refused.
 The gate lives in the tool, so it applies under every harness and permission mode, including unattended runs.
 It fails closed: Cancel, a 120-second timeout, or a missing dialog sends nothing.
+Linux has no dialog yet, so there reads work and every write stops with `APPROVAL_UNAVAILABLE`.
 Writes are never retried, because a retry after a lost response could publish twice.
 A failed response that might have been applied returns `OUTCOME_UNKNOWN`.
 
