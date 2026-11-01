@@ -1,5 +1,5 @@
 import { AxiError } from "axi-sdk-js";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -94,6 +94,17 @@ export function writeAccount(account: Account): void {
   writeFileSync(join(ensureDir(), "account.json"), JSON.stringify(account), { mode: 0o600 });
 }
 
+/** After logout the cached account would name a login that no longer exists. The ledger and follow log stay. */
+export function clearAccount(): void {
+  const account = readAccount();
+  if (account) migrateFollowLog(account);
+  try {
+    unlinkSync(join(stateDir(), "account.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+}
+
 export const DAY_MS = 24 * 3600 * 1000;
 
 /** What one X account did through this tool. */
@@ -111,7 +122,7 @@ interface FollowFile {
 
 /**
  * Version 1 was a flat map of user ID to time, with no owner. Only account.json
- * can name that owner, so this must run before account.json is overwritten.
+ * can name that owner, so this must run before account.json is overwritten or deleted.
  * A missing or corrupt file is left for readFollows to handle.
  */
 function migrateFollowLog(owner: Account): void {

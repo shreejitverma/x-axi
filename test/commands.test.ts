@@ -1,10 +1,35 @@
+import { AxiError } from "axi-sdk-js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
 import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
+import { createAuth, type AuthService, type AuthStatus, type LogoutReport, type RevokeOutcome } from "../src/auth.js";
 import { buildCommands } from "../src/commands.js";
+import { readConfig } from "../src/config.js";
+
+const STATUS: AuthStatus = {
+  logged_in: true,
+  storage: "fake keystore",
+  client_id: "client-id-1234",
+  scopes: ["tweet.read"],
+  access_token_expires_at: "2026-11-01T10:00:00.000Z",
+  access_token: "valid",
+  refresh_token: "present",
+};
+const LOGOUT: LogoutReport = { had_login: true, revoked: ["access_token", "refresh_token"], revoke_failed: {}, deleted: true };
+
+/** Fake login state. Nothing in it resembles a token, so output tests can assert on the whole output. */
+function fakeAuth(overrides: Partial<AuthService> = {}): AuthService {
+  return {
+    accessToken: async () => "fake-access-token",
+    login: async () => STATUS,
+    logout: async () => LOGOUT,
+    status: async () => STATUS,
+    ...overrides,
+  };
+}
 
 type Call = { method: Method; path: string; body?: Json };
 const ok = (body: Json, status = 200): ApiResponse => ({ status, body });
@@ -30,16 +55,19 @@ function harness(handler: (call: Call) => ApiResponse | Promise<ApiResponse>, ap
     return approval;
   });
   const writes = () => calls.filter((c) => c.method !== "GET");
-  return { commands: buildCommands({ client, approve }), calls, writes, requests, approve };
+  const auth = fakeAuth();
+  return { commands: buildCommands({ client, approve, auth }), calls, writes, requests, approve, auth };
 }
 
 let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "x-axi-test-"));
   process.env["X_AXI_STATE_DIR"] = dir;
+  process.env["XDG_CONFIG_HOME"] = join(dir, "config");
 });
 afterEach(() => {
   delete process.env["X_AXI_STATE_DIR"];
+  delete process.env["XDG_CONFIG_HOME"];
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -342,7 +370,7 @@ describe("review regressions", () => {
     const down = () => {
       const approve = vi.fn(async (): Promise<ApprovalResult> => "approved");
       const request = vi.fn(async () => { throw new Error("network failure: ENOTFOUND"); });
-      return { approve, request, commands: buildCommands({ client: { request }, approve }) };
+      return { approve, request, commands: buildCommands({ client: { request }, approve, auth: fakeAuth() }) };
     };
 
     it.each([
@@ -647,7 +675,7 @@ describe("follow-file", () => {
   };
   const followOk = () => ok({ data: { following: true, pending_follow: false } });
   const withSleep = (h: ReturnType<typeof harness>, client: XClient, sleeps: number[]) =>
-    buildCommands({ client, approve: h.approve, sleep: async (ms) => { sleeps.push(ms); } });
+    buildCommands({ client, approve: h.approve, auth: h.auth, sleep: async (ms) => { sleeps.push(ms); } });
 
   function run(handler: Parameters<typeof harness>[0], approval: ApprovalResult = "approved") {
     const h = harness(handler, approval);
@@ -740,6 +768,7 @@ describe("follow log", () => {
         return path === "/2/users/me" ? ME : handler(call);
       } },
       approve: h.approve,
+      auth: h.auth,
       sleep: async () => {},
     });
 
@@ -1011,5 +1040,215 @@ describe("spend ledger", () => {
     const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string; unpriced_calls_30d: number } };
     expect(out.spend.last_30d_usd).toBe("0.025"); // refresh 0.010 + post 0.015
     expect(out.spend.unpriced_calls_30d).toBe(1);
+  });
+});
+
+describe("account commands", () => {
+  it("login takes the client ID from the flag, stores it in the config, and caches the account", async () => {
+    const login = vi.fn(async () => STATUS);
+    const h = harness(() => PARENT);
+    const commands = buildCommands({ client: { request: async (m, p, b) => { h.calls.push({ method: m, path: p, ...(b ? { body: b } : {}) }); return ME; } }, approve: h.approve, auth: fakeAuth({ login }) });
+    const out = await commands["login"]!(["--client-id", "client-id-1234"]);
+    expect(login).toHaveBeenCalledWith("client-id-1234");
+    expect(out).toMatchObject({ login: { account: "@shreejit", scopes: ["tweet.read"], storage: "fake keystore" }, est_cost: "$0.010" });
+    expect(readConfig()).toEqual({ client_id: "client-id-1234" });
+    expect(JSON.parse(readFileSync(join(dir, "account.json"), "utf8"))).toEqual({ id: "1", username: "shreejit" });
+    expect(h.calls.map((c) => c.path)).toEqual(["/2/users/me"]);
+  });
+
+  it("login falls back to the saved client ID, ignores the environment, and refuses to run with none", async () => {
+    const login = vi.fn(async () => STATUS);
+    const h = harness(() => PARENT);
+    const commands = buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth({ login }) });
+    process.env["X_AXI_CLIENT_ID"] = "from-environment";
+    try {
+      await expect(commands["login"]!([])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(login).not.toHaveBeenCalled();
+    } finally {
+      delete process.env["X_AXI_CLIENT_ID"];
+    }
+    await commands["login"]!(["--client-id", "client-id-1234"]);
+    await commands["login"]!([]);
+    expect(login).toHaveBeenLastCalledWith("client-id-1234");
+    await expect(commands["login"]!(["--client-id", "bad id!"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(commands["login"]!(["extra"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+  });
+
+  it("login keeps the stored login when the account read fails, says so, and drops the previous account cache", async () => {
+    writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "2", username: "previous" }));
+    const h = harness(() => PARENT);
+    const commands = buildCommands({ client: { request: async () => ok({ detail: "client-not-enrolled" }, 403) }, approve: h.approve, auth: fakeAuth() });
+    await expect(commands["login"]!(["--client-id", "client-id-1234"])).rejects.toMatchObject({
+      code: "APP_NOT_ENROLLED",
+      message: expect.stringContaining("stored the login"),
+      suggestions: expect.arrayContaining([expect.stringContaining("x-axi me")]),
+    });
+    expect(readConfig()).toEqual({ client_id: "client-id-1234" });
+    expect(existsSync(join(dir, "account.json"))).toBe(false);
+    const broken = buildCommands({ client: { request: async () => { throw new Error("socket hang up"); } }, approve: h.approve, auth: fakeAuth() });
+    await expect(broken["login"]!([])).rejects.toMatchObject({ code: "X_UNAVAILABLE", message: expect.stringContaining("stored the login") });
+  });
+
+  it("login succeeds with a warning when the config file cannot be written", async () => {
+    writeFileSync(join(dir, "config"), "a file where the config directory should be");
+    const h = harness(() => PARENT);
+    const commands = buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth() });
+    await expect(commands["login"]!(["--client-id", "client-id-1234"])).resolves.toMatchObject({
+      login: { account: "@shreejit" },
+      warning: expect.stringContaining("client ID not saved"),
+    });
+  });
+
+  it("logout clears the cached account and reports what was revoked", async () => {
+    writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "1", username: "shreejit" }));
+    writeFileSync(join(dir, "ledger.jsonl"), "");
+    const h = harness(() => PARENT);
+    await expect(h.commands["logout"]!([])).resolves.toEqual({
+      logout: { stored_login: "deleted", revoked_at_x: "access_token, refresh_token" },
+    });
+    expect(existsSync(join(dir, "account.json"))).toBe(false);
+    expect(existsSync(join(dir, "ledger.jsonl"))).toBe(true);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("keeps a flat follow log with its owner when the cached account is cleared before a different login", async () => {
+    for (const leave of [
+      async (commands: ReturnType<typeof buildCommands>) => commands["login"]!(["--client-id", "client-id-1234"]),
+      async (commands: ReturnType<typeof buildCommands>) => {
+        await commands["logout"]!([]);
+        await commands["login"]!(["--client-id", "client-id-1234"]);
+      },
+    ]) {
+      writeFileSync(join(dir, "follows.json"), JSON.stringify({ "77": "2026-01-01T00:00:00.000Z" }));
+      writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "2", username: "previous" }));
+      const h = harness(() => PARENT);
+      await leave(buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth() }));
+      const log = JSON.parse(readFileSync(join(dir, "follows.json"), "utf8")) as { accounts: Record<string, { following: Record<string, string> }> };
+      expect(Object.keys(log.accounts)).toEqual(["2"]);
+      expect(log.accounts["2"]!.following).toEqual({ "77": "2026-01-01T00:00:00.000Z" });
+      expect(JSON.parse(readFileSync(join(dir, "account.json"), "utf8"))).toEqual({ id: "1", username: "shreejit" });
+    }
+  });
+
+  it("setup uses a 127.0.0.1 redirect_uri on an unprivileged port", async () => {
+    for (const uri of ["http://127.0.0.1:1024/callback", "http://127.0.0.1:65535/callback"]) {
+      mkdirSync(join(dir, "config", "x-axi"), { recursive: true });
+      writeFileSync(join(dir, "config", "x-axi", "config.json"), JSON.stringify({ redirect_uri: uri }));
+      const h = harness(() => PARENT);
+      const out = (await h.commands["setup"]!([])) as { callback_url: string; steps: string[] };
+      expect(out.callback_url).toBe(uri);
+      expect(out.steps.join("\n")).toContain(uri);
+    }
+  });
+
+  it("setup and login refuse any other redirect_uri before starting a sign-in", async () => {
+    mkdirSync(join(dir, "config", "x-axi"), { recursive: true });
+    for (const uri of ["http://localhost:8711/callback", "http://127.0.0.1:99999/callback", "http://127.0.0.1:65536/callback", "http://127.0.0.1:80/callback", "http://127.0.0.1:1023/callback", "http://127.0.0.1/callback", "https://127.0.0.1:8711/callback", "http://127.0.0.1.example.com:8711/callback", 8711]) {
+      writeFileSync(join(dir, "config", "x-axi", "config.json"), JSON.stringify({ redirect_uri: uri }));
+      const login = vi.fn(async () => STATUS);
+      const h = harness(() => PARENT);
+      const commands = buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth({ login }) });
+      const expected = { code: "VALIDATION_ERROR", suggestions: [expect.stringContaining("Callback URI")] };
+      await expect(commands["login"]!(["--client-id", "client-id-1234"])).rejects.toMatchObject(expected);
+      await expect(commands["setup"]!([])).rejects.toMatchObject(expected);
+      expect(login).not.toHaveBeenCalled();
+    }
+  });
+
+  describe("login over a stored login", () => {
+    const relogin = (revokeReplaced: () => Promise<RevokeOutcome>, request: XClient["request"] = async () => ME) => {
+      const h = harness(() => PARENT);
+      return buildCommands({ client: { request }, approve: h.approve, auth: fakeAuth({ login: async () => ({ ...STATUS, revokeReplaced }) }) })["login"]!(["--client-id", "client-id-1234"]);
+    };
+    const cacheAccount = (id: string, username: string) => writeFileSync(join(dir, "account.json"), JSON.stringify({ id, username }));
+    const revoked = () => vi.fn(async () => ({ revoked: ["access_token", "refresh_token"], revoke_failed: {} }));
+
+    it("revokes the old tokens when the account changed", async () => {
+      cacheAccount("2", "previous");
+      const revoke = revoked();
+      await expect(relogin(revoke)).resolves.toMatchObject({ login: { account: "@shreejit" }, earlier_login: "revoked the tokens of @previous at X" });
+      expect(revoke).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports a failed revocation for the old account", async () => {
+      cacheAccount("2", "previous");
+      const out = await relogin(async () => ({ revoked: ["access_token"], revoke_failed: { refresh_token: "invalid_request" } }));
+      expect(out).toMatchObject({ login: { account: "@shreejit" }, earlier_login: expect.stringContaining("refresh_token: invalid_request") });
+      expect(out["earlier_login"]).toContain("connected_apps");
+    });
+
+    it("leaves the old tokens live and says so when the account is the same or unknown", async () => {
+      for (const prepare of [() => cacheAccount("1", "shreejit"), () => rmSync(join(dir, "account.json"), { force: true }), () => writeFileSync(join(dir, "account.json"), "{}")]) {
+        prepare();
+        const revoke = revoked();
+        const out = await relogin(revoke);
+        expect(revoke).not.toHaveBeenCalled();
+        expect(out["earlier_login"]).toContain("stay live");
+        expect(out["earlier_login"]).toContain("`x-axi logout` before `x-axi login`");
+      }
+    });
+
+    it("leaves the old tokens live and says so when the new account cannot be read", async () => {
+      cacheAccount("2", "previous");
+      const revoke = revoked();
+      const error = await relogin(revoke, async () => ok({ detail: "client-not-enrolled" }, 403)).catch((e: AxiError) => e);
+      expect(revoke).not.toHaveBeenCalled();
+      expect((error as AxiError).message).toContain("stored the login");
+      expect((error as AxiError).suggestions.join("\n")).toContain("stay live");
+    });
+
+    it("says nothing about an earlier login when none was replaced", async () => {
+      const h = harness(() => PARENT);
+      const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth() })["login"]!(["--client-id", "client-id-1234"]);
+      expect(out).not.toHaveProperty("earlier_login");
+    });
+  });
+
+  it("logout reports a failed revocation next to the deletion", async () => {
+    const h = harness(() => PARENT);
+    const auth = fakeAuth({ logout: async () => ({ had_login: true, revoked: ["access_token"], revoke_failed: { refresh_token: "invalid_request" }, deleted: true }) });
+    const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth })["logout"]!([]);
+    expect(out).toMatchObject({ logout: { stored_login: "deleted", revoked_at_x: "access_token", revoke_failed: { refresh_token: "invalid_request" } }, help: [expect.stringContaining("connected_apps")] });
+  });
+
+  it("auth status names the cached account and the storage, with no API call", async () => {
+    writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "1", username: "shreejit" }));
+    const h = harness(() => PARENT);
+    await expect(h.commands["auth"]!(["status"])).resolves.toEqual({ auth: { account: "@shreejit", ...STATUS } });
+    await expect(h.commands["auth"]!([])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["auth"]!(["status", "--full"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("setup names the exact callback URL, the Native App type, the keystore, and a working xurl upgrade, with no xurl command", async () => {
+    const h = harness(() => PARENT);
+    const out = (await h.commands["setup"]!([])) as { callback_url: string; steps: string[]; storage: string; client_id: string };
+    expect(out.callback_url).toBe("http://127.0.0.1:8711/callback");
+    expect(out.storage).toBe("fake keystore");
+    expect(out.client_id).toContain("not configured");
+    expect(out.steps.join("\n")).toContain("http://127.0.0.1:8711/callback");
+    expect(out.steps.join("\n")).toContain("Native App");
+    expect(out.steps.join("\n")).toContain("x-axi login --client-id");
+    expect(out.steps.join("\n")).toContain("tweet.moderate.write");
+    expect(out.steps.join("\n").toLowerCase()).not.toContain("client secret:");
+    expect(out.steps.join("\n")).not.toContain("xurl auth");
+    const upgrade = out.steps.find((step) => step.startsWith("Upgrading"));
+    for (const part of ["Native App", "http://127.0.0.1:8711/callback", "x-axi login --client-id YOUR_CLIENT_ID", "delete ~/.xurl"]) expect(upgrade).toContain(part);
+    expect(h.calls).toEqual([]);
+  });
+
+  it("setup shows a keystore problem instead of failing", async () => {
+    const h = harness(() => PARENT);
+    const auth = fakeAuth({ status: async () => ({ logged_in: false, storage: "unavailable (no keystore)", problem: "no OS keystore is available", help: ["Install secret-tool"] }) });
+    const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth })["setup"]!([]);
+    expect(out).toMatchObject({ login: "unknown, see storage_problem", storage_problem: "no OS keystore is available", help: ["Install secret-tool"] });
+  });
+
+  it("setup does not blame the keystore for a stored record it can read but not use", async () => {
+    const h = harness(() => PARENT);
+    const store = { backend: "fake keystore", read: async () => JSON.stringify({ version: 99 }), write: async () => undefined, delete: async () => undefined };
+    const auth = createAuth({ store, endpoints: { authorize: "http://127.0.0.1:9/a", token: "http://127.0.0.1:9/t", revoke: "http://127.0.0.1:9/r" }, redirectUri: "http://127.0.0.1:8711/callback", lockDir: dir, openBrowser: async () => undefined, log: () => undefined });
+    const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth })["setup"]!([]);
+    expect(out).toMatchObject({ login: "unknown, see storage_problem", storage_problem: expect.stringContaining("not one this version can read"), help: [expect.stringContaining("x-axi logout")] });
   });
 });
