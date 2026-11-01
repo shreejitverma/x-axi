@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -166,6 +166,44 @@ describe("reads", () => {
     expect(short.posts[0]!.text).toContain("truncated, 400 chars total");
     const full = (await h.commands["timeline"]!(["--full"])) as { posts: { text: string }[] };
     expect(full.posts[0]!.text).toBe(long);
+  });
+
+  it.each([
+    ["list", ["list"]],
+    ["read", ["read", "alice"]],
+  ])("truncates long DM text unless --full on dm %s", async (_name, args) => {
+    const long = "a".repeat(600);
+    const h = harness((c) =>
+      c.path.startsWith("/2/users/by/username/")
+        ? ok({ data: { id: "9", username: "alice" } })
+        : ok({ data: [{ id: "7", text: long, sender_id: "9" }] }),
+    );
+    const short = (await h.commands["dm"]!(args)) as { messages: { text: string }[] };
+    expect(short.messages[0]!.text).toContain("truncated, 600 chars total");
+    const full = (await h.commands["dm"]!([...args, "--full"])) as { messages: { text: string }[] };
+    expect(full.messages[0]!.text).toBe(long);
+  });
+
+  it("refuses --full on dm send", async () => {
+    const h = harness(() => PARENT);
+    await expect(h.commands["dm"]!(["send", "alice", "hi", "--full"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["timeline", []],
+    ["mentions", []],
+    ["search", ["foo"]],
+  ])("%s names the cached account it read as, with no refresh", async (command, args) => {
+    writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "2", username: "older" }));
+    const h = harness(() => ok({ data: [{ id: "5", text: "hi", author_id: "9" }] }));
+    await expect(h.commands[command]!(args)).resolves.toMatchObject({ account: "@older" });
+    expect(h.calls.map((c) => c.path)).not.toContain("/2/users/me");
+  });
+
+  it("search names no account before one is known", async () => {
+    const h = harness(() => ok({ data: [{ id: "5", text: "hi", author_id: "9" }] }));
+    await expect(h.commands["search"]!(["foo"])).resolves.not.toHaveProperty("account");
   });
 
   it("uses a conversation search for replies", async () => {
@@ -625,6 +663,55 @@ describe("follow log", () => {
     const h = harness(respond);
     const out = await withoutSleep(h, respond)["follow-file"]!([queueFile(["100", "101", "102"])]);
     expect(out).toMatchObject({ follow_file: { followed: 1, remaining: 2 }, stopped: { code: "OUTCOME_UNKNOWN" }, est_cost: "$0.030" });
+  });
+
+  const unknownFollows: [string, () => ApiResponse][] = [
+    ["a 503", () => ok({}, 503)],
+    ["a redirect", () => ok({}, 307)],
+    ["a lost response", () => { throw new Error("socket hang up"); }],
+    ["an unconfirmed 2xx", () => ok({ data: { following: false, pending_follow: false } })],
+  ];
+
+  it.each(unknownFollows)("follow-file counts a follow against the cap after %s, and resume still tries it", async (_name, unknown) => {
+    seedRecent(398);
+    const respond = (c: Call) => (c.method === "GET" ? ALICE : unknown());
+    const h = harness(respond);
+    const file = queueFile(["100"]);
+    await expect(withoutSleep(h, respond)["follow-file"]!([file])).resolves.toMatchObject({ stopped: { code: "OUTCOME_UNKNOWN" } });
+    const record = logFile().accounts["1"]!;
+    expect(record.events).toHaveLength(399);
+    expect(record.following["100"]).toBeUndefined();
+    const next = harness(social);
+    await expect(withoutSleep(next, social)["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { followed: 1, remaining: 0 } });
+    expect(next.writes().map((c) => c.body?.["target_user_id"])).toEqual(["100"]);
+    expect(logFile().accounts["1"]!.events).toHaveLength(400);
+    await expect(next.commands["follow-file"]!([queueFile(["101"])])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
+  });
+
+  it.each(unknownFollows)("follow counts against the cap after %s, without marking the account followed", async (_name, unknown) => {
+    const h = harness((c) => (c.method === "GET" ? ALICE : unknown()));
+    await expect(h.commands["follow"]!(["alice"])).rejects.toMatchObject({ code: "OUTCOME_UNKNOWN" });
+    const record = logFile().accounts["1"]!;
+    expect(record.events).toHaveLength(1);
+    expect(record.following).toEqual({});
+  });
+
+  it("does not use up cap room for a follow X refused", async () => {
+    const h = harness((c) => (c.method === "GET" ? ALICE : ok({ detail: "no" }, 403)));
+    await expect(h.commands["follow"]!(["alice"])).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(existsSync(logPath())).toBe(false);
+  });
+
+  it("keeps the unknown outcome when the log breaks while counting it", async () => {
+    const h = harness((c) => {
+      if (c.method === "GET") return ALICE;
+      writeFileSync(logPath(), "{not json");
+      return ok({}, 503);
+    });
+    await expect(h.commands["follow"]!(["alice"])).rejects.toMatchObject({
+      code: "OUTCOME_UNKNOWN",
+      suggestions: expect.arrayContaining([expect.stringContaining("follow log not updated")]),
+    });
   });
 
   it("leaves a follow X refused out of the batch estimate", async () => {

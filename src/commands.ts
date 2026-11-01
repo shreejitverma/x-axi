@@ -3,7 +3,7 @@ import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type 
 import type { ApprovalBody, ApprovalResult, Approver } from "./approve.js";
 import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseOutgoingText, parsePostId, usage } from "./args.js";
 import { readFileSync } from "node:fs";
-import { assertFollowLogReadable, DAY_MS, logFollow, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
+import { assertFollowLogReadable, DAY_MS, logFollow, logFollowAttempt, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
 import { estimatePostCost, RATES } from "./rates.js";
 
 export interface Deps {
@@ -112,7 +112,7 @@ export const HELP: Record<string, string> = {
   view: "usage: x-axi view <post-id-or-url> [--full]",
   search: "usage: x-axi search <query> [--limit 10-100] [--next TOKEN] [--full]\nRecent search, last 7 days. Each result costs about $0.005.",
   user: "usage: x-axi user <handle>",
-  dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN]\n  x-axi dm send <handle> <text>   (needs your approval)\nEncrypted XChat conversations are not covered.",
+  dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text>   (needs your approval)\nEncrypted XChat conversations are not covered.",
   post: "usage: x-axi post <text>\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL.",
   reply: "usage: x-axi reply <post-id-or-url> <text>\nOpens an approval dialog showing the parent post. X allows this only on your own posts or when the author mentioned or quoted you.",
   delete: "usage: x-axi delete <post-id-or-url>\nOpens an approval dialog showing the post. Already deleted is a no-op.",
@@ -199,7 +199,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const response = await get(deps, `/2/users/${account.id}/${endpoint}?${q}&${POST_FIELDS}`);
     const rows = postRows(response.body, name === "mentions" ? account : undefined, parsed.flags.has("--full"));
     const usd = rows.length * RATES.ownedRead + includedUsers(response.body) * RATES.ownedRead;
-    return listOutput("posts", rows, response.body, `0 ${name} found`, charge(name, usd));
+    return { account: `@${account.username}`, ...listOutput("posts", rows, response.body, `0 ${name} found`, charge(name, usd)) };
   };
 
   const recentSearch = async (query: string, op: string, args: string[]): Promise<Output> => {
@@ -213,7 +213,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const response = await get(deps, path);
     const rows = postRows(response.body, account, parsed.flags.has("--full"));
     const usd = rows.length * RATES.postRead + includedUsers(response.body) * RATES.userRead;
-    return listOutput("posts", rows, response.body, `0 posts found in the last 7 days`, charge(op, usd));
+    return {
+      ...(account ? { account: `@${account.username}` } : {}),
+      ...listOutput("posts", rows, response.body, `0 posts found in the last 7 days`, charge(op, usd)),
+    };
   };
 
   const fetchPost = async (id: string): Promise<{ post: Json; author: string; usd: number } | undefined> => {
@@ -290,6 +293,20 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     if (response.status >= 400) throw toApiError(response, errorContext);
     spend(op, usd);
     return response;
+  };
+
+  /** Returns X's confirmation. Every unknown outcome counts against the cap, because X may have applied that follow. */
+  const sendFollow = async (account: Account, target: Account): Promise<Json> => {
+    const check = checkProfile(target.username);
+    try {
+      const response = await send("POST", `/2/users/${account.id}/following`, { target_user_id: target.id }, "follow", RATES.userInteraction, check);
+      const data = response.body["data"] as Json | undefined;
+      if (data?.["following"] !== true && data?.["pending_follow"] !== true) throw outcomeUnknown("X did not confirm the follow", check);
+      return data;
+    } catch (error) {
+      if (error instanceof AxiError && error.code === "OUTCOME_UNKNOWN") persistFollowLog(() => logFollowAttempt(account.id));
+      throw error;
+    }
   };
 
   const createPost = async (text: string, replyTo: string | undefined, account: Account, context?: string): Promise<Output> => {
@@ -403,7 +420,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         return { dm: { id: data["dm_event_id"], to: `@${target.username}`, status: "sent" }, est_cost: money(RATES.dmCreate) };
       }
       if (sub === "list" || sub === "read") {
-        const parsed = parseArgs(rest, `dm ${sub}`, flagsForList);
+        const parsed = parseArgs(rest, `dm ${sub}`, flagsForList, ["--full"]);
         if (sub === "list" && parsed.positional.length) throw usage("`dm list` takes no arguments");
         const limit = parseLimit(parsed, 20, 1, 100);
         const q = `${pagedQuery(limit, parsed.flags.get("--next"))}&dm_event.fields=created_at,sender_id,text&expansions=sender_id&user.fields=username&event_types=MessageCreate`;
@@ -417,7 +434,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         const rows = ((response.body["data"] as Json[] | undefined) ?? []).map((event) => ({
           id: String(event["id"]),
           author: names.get(String(event["sender_id"])) ?? String(event["sender_id"]),
-          text: truncate(String(event["text"] ?? ""), false),
+          text: truncate(String(event["text"] ?? ""), parsed.flags.has("--full")),
           at: String(event["created_at"] ?? ""),
         }));
         const usd = rows.length * RATES.dmRead + includedUsers(response.body) * RATES.userRead;
@@ -462,10 +479,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       assertFollowLogReadable();
       const target = await resolveUser(handle);
       await gate("Follow", account, { content: `@${target.username}` }, RATES.userInteraction);
-      const check = checkProfile(target.username);
-      const response = await send("POST", `/2/users/${account.id}/following`, { target_user_id: target.id }, "follow", RATES.userInteraction, check);
-      const data = response.body["data"] as Json | undefined;
-      if (data?.["following"] !== true && data?.["pending_follow"] !== true) throw outcomeUnknown("X did not confirm the follow", check);
+      const data = await sendFollow(account, target);
       persistFollowLog(() => logFollow(account.id, target.id));
       return { follow: { handle: `@${target.username}`, status: data["pending_follow"] === true ? "requested" : "following" }, est_cost: money(RATES.userInteraction) };
     },
@@ -514,12 +528,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       for (const [index, user] of batch.entries()) {
         if (index > 0) await sleep(FOLLOW_INTERVAL_MS);
         try {
-          const check = checkProfile(user.username);
-          const response = await send("POST", `/2/users/${account.id}/following`, { target_user_id: user.id }, "follow", RATES.userInteraction, check);
-          const data = response.body["data"] as Json | undefined;
-          if (data?.["pending_follow"] === true) requested += 1;
-          else if (data?.["following"] === true) followed += 1;
-          else throw outcomeUnknown("X did not confirm the follow", check);
+          const data = await sendFollow(account, user);
+          if (data["pending_follow"] === true) requested += 1;
+          else followed += 1;
         } catch (error) {
           if (!(error instanceof AxiError)) throw error;
           stopped = { at: `@${user.username}`, code: error.code, reason: error.message };

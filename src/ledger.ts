@@ -100,7 +100,7 @@ export const DAY_MS = 24 * 3600 * 1000;
 export interface FollowRecord {
   /** Accounts currently followed, by user ID. This is the resume state, so an unfollow removes the entry. */
   following: Record<string, string>;
-  /** The time of every follow in the last 24 hours. This is the rate history, so an unfollow keeps it. */
+  /** The time of every follow in the last 24 hours, confirmed or with an unknown outcome. This is the rate history, so an unfollow keeps it. */
   events: string[];
 }
 
@@ -163,13 +163,23 @@ export function assertFollowLogReadable(): void {
   loadFollowFile();
 }
 
+function addFollowEvent(file: FollowFile, accountId: string, now: Date): FollowRecord {
+  const record = file.accounts[accountId] ?? { following: {}, events: [] };
+  record.events = [...record.events.filter((event) => now.getTime() - new Date(event).getTime() < DAY_MS), now.toISOString()];
+  file.accounts[accountId] = record;
+  return record;
+}
+
 export function logFollow(accountId: string, targetId: string, now = new Date()): void {
   const file = loadFollowFile();
-  const record = file.accounts[accountId] ?? { following: {}, events: [] };
-  const at = now.toISOString();
-  record.following[targetId] = at;
-  record.events = [...record.events.filter((event) => now.getTime() - new Date(event).getTime() < DAY_MS), at];
-  file.accounts[accountId] = record;
+  addFollowEvent(file, accountId, now).following[targetId] = now.toISOString();
+  saveFollowFile(file);
+}
+
+/** For a follow X may have applied: it counts against the cap, but resume must still check that account. */
+export function logFollowAttempt(accountId: string, now = new Date()): void {
+  const file = loadFollowFile();
+  addFollowEvent(file, accountId, now);
   saveFollowFile(file);
 }
 

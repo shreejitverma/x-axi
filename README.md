@@ -25,6 +25,9 @@ Run `x-axi setup` and follow the steps in your own terminal, not through an agen
 | Read | `me`, `timeline`, `mentions`, `replies`, `view`, `search`, `user`, `dm list`, `dm read`, `api`, `spend` |
 | Write, approval required | `post`, `reply`, `delete`, `hide`, `unhide`, `follow`, `unfollow`, `follow-file`, `dm send` |
 
+Reads use the account cached by the last `me` or write, and timeline, mentions, and search output name it in `account`.
+After switching logins with xurl, run `x-axi me` to refresh it.
+
 ## Safety model
 
 Every write opens a native macOS dialog showing the account, parent post, and estimated cost.
@@ -49,7 +52,7 @@ Checked against the [changelog](https://docs.x.com/changelog) and [pricing](http
   A live follow on a Pay-per-use app still succeeded on 2026-10-31, so following may stop working without notice; liking and quote-posting are untested.
 - [Following](https://help.x.com/en/using-x/x-follow-limit) is limited to 400 per day and 50 per 15 minutes, and X may lock accounts for aggressive following.
   `follow-file` asks once per batch, follows every 20 seconds, caps itself at 400 in 24 hours, and stops at the first error.
-  Unfollowing does not give back room under that cap.
+  Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.
 - `follow-file` treats an account as already followed only if the logged-in account followed it through x-axi, and it does not read X's following list, because each listed account is billed.
   Filter a queue against your real following list when you build it, or those accounts are followed and billed again.
   The approval dialog shows usernames from the file, which are not verified with X; the follow goes to each entry's `id`.
