@@ -249,6 +249,15 @@ describe("review regressions", () => {
     ["family", "\u{1f468}‍\u{1f469}‍\u{1f467}"],
     ["a Devanagari conjunct", "क्‍ष"],
     ["a Sinhala conjunct", "ශ්‍රී"],
+    ["a Bengali ra-phala", "র‍্যাব"],
+    ["Persian with a non-joiner", "می‌خواهم"],
+    ["a Devanagari non-joiner after a virama", "क्‌ष"],
+    ["the England flag", "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"],
+    ["the Scotland flag", "\u{1f3f4}\u{e0067}\u{e0062}\u{e0073}\u{e0063}\u{e0074}\u{e007f}"],
+    ["the Wales flag", "\u{1f3f4}\u{e0067}\u{e0062}\u{e0077}\u{e006c}\u{e0073}\u{e007f}"],
+    ["Hebrew with a right-to-left mark", "שלום‏!"],
+    ["Arabic with a left-to-right mark", "مرحبا ‎abc"],
+    ["a reserved emoji code point", "\u{1f0f6}"],
   ];
 
   it.each(joined)("posts and shows %s unchanged", async (_name, text) => {
@@ -276,7 +285,42 @@ describe("review regressions", () => {
     ["across a line break", "\u{1f469}\n‍\u{1f4bb}"],
     ["after a consonant with no virama", "क‍ष"],
     ["with a selector after a letter", "a️‍\u{1f4bb}"],
+    ["before a virama with no letter", "‍্য"],
+    ["before another script's virama", "क‍্"],
+    ["between Bengali letters with no virama", "র‍য"],
   ];
+
+  const strayFormat = [
+    ["a non-joiner in Latin", "a‌b"],
+    ["a non-joiner at the end", "م‌"],
+    ["a non-joiner at the start", "‌م"],
+    ["a non-joiner across scripts", "م‌क"],
+    ["a non-joiner before a digit", "م‌1"],
+    ["a doubled non-joiner", "م‌‌م"],
+    ["tag characters with no flag", "\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"],
+    ["a flag sequence with no terminator", "\u{1f3f4}\u{e0067}\u{e0062}\u{e0065}"],
+    ["a flag sequence of hidden text", `\u{1f3f4}${"\u{e0061}".repeat(8)}\u{e007f}`],
+    ["capital tag characters in a flag", "\u{1f3f4}\u{e0047}\u{e0042}\u{e0045}\u{e007f}"],
+    ["tag characters after another flag", "\u{1f3f3}\u{e0067}\u{e0062}\u{e0065}\u{e006e}\u{e0067}\u{e007f}"],
+    ["a right-to-left mark in Latin", "abc‏def"],
+    ["a left-to-right mark in Latin", "abc‎def"],
+    ["an override in Hebrew", "ש‮abc"],
+    ["an embedding in Arabic", "م‪abc‬"],
+    ["an isolate in Hebrew", "ש⁦abc⁩"],
+    ["an unassigned code point that is not an emoji", "a͸b"],
+    ["a soft hyphen in Hebrew", "ש­ל"],
+  ];
+
+  it.each(strayFormat)("refuses %s, and marks it in text from X", async (_name, text) => {
+    const refused = harness(() => PARENT);
+    await expect(refused.commands["post"]!([text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(refused.commands["dm"]!(["send", "alice", text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(refused.approve).not.toHaveBeenCalled();
+    const parent = ok({ data: { id: "50", text, author_id: "9" }, includes: { users: [{ id: "9", username: "alice" }] } });
+    const shown = harness((c) => (c.method === "GET" ? parent : ok({ data: { deleted: true } })));
+    await shown.commands["delete"]!(["50"]);
+    expect(formatApproval(shown.requests[0]!)).toContain("�");
+  });
 
   it.each(strayJoiners)("refuses a joiner %s", async (_name, text) => {
     const h = harness(() => PARENT);

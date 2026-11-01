@@ -32,6 +32,8 @@ After switching logins with xurl, run `x-axi me` to refresh it.
 
 Every write opens a native macOS dialog showing the account, parent post, and estimated cost.
 Outgoing text appears in full under a tool-written header with its exact character and line counts, so all of those lines are sent, whatever they say about themselves.
+Invisible characters are refused except where a language or emoji needs them: joiners in emoji and Arabic or Indic script text, tag characters in subdivision flags, and direction marks in right-to-left text.
+Bidi embeddings, overrides, and isolates are always refused.
 The gate lives in the tool, so it applies under every harness and permission mode, including unattended runs.
 It fails closed: Cancel, a 120-second timeout, or a missing dialog sends nothing.
 Writes are never retried, because a retry after a lost response could publish twice.

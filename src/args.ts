@@ -66,10 +66,43 @@ export function parseHandle(value: string | undefined): string {
 // This covers format, control, separator, private-use, and unassigned code points
 // (tag characters included), plus blank fillers and hidden variation selectors.
 const DECEPTIVE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}͏ᅟᅠ឴឵᠋-᠍⠀ㅤ︀-︎ﾠ\u{e0100}-\u{e01ef}]/u;
-// A zero-width joiner is ordinary text in exactly two places: between two emoji
-// (after any U+FE0F or skin tone), and after a virama, listed by script because
-// JavaScript has no property for it. DECEPTIVE still refuses it everywhere else.
-const TEXT_JOINER = /(?<=\p{Extended_Pictographic}[\u{fe0f}\u{1f3fb}-\u{1f3ff}]?)‍(?=\p{Extended_Pictographic})|(?<=[्্੍્୍்్್്්])‍/gu;
+// Viramas are listed by script because JavaScript has no property for them.
+const VIRAMAS: Record<string, string> = {
+  Devanagari: "\\u094d",
+  Bengali: "\\u09cd",
+  Gurmukhi: "\\u0a4d",
+  Gujarati: "\\u0acd",
+  Oriya: "\\u0b4d",
+  Tamil: "\\u0bcd",
+  Telugu: "\\u0c4d",
+  Kannada: "\\u0ccd",
+  Malayalam: "\\u0d4d",
+  Sinhala: "\\u0dca",
+};
+const RTL_SCRIPTS = ["Arabic", "Hebrew", "Syriac", "Thaana", "Nko", "Adlam", "Hanifi_Rohingya", "Mandaic", "Samaritan"];
+const letterOf = (script: string): string => `[\\p{L}&&\\p{sc=${script}}]`;
+const RTL_LETTER = `[\\p{L}&&[${RTL_SCRIPTS.map((script) => `\\p{sc=${script}}`).join("")}]]`;
+
+// The only places DECEPTIVE's characters are ordinary text. Everywhere else they stay refused,
+// and bidi embeddings, overrides, and isolates have no exception, because they can reorder the dialog.
+const ORDINARY_FORMAT = new RegExp(
+  `(${[
+    // U+200D between two emoji, after any U+FE0F or skin tone.
+    String.raw`(?<=\p{Extended_Pictographic}[\u{fe0f}\u{1f3fb}-\u{1f3ff}]?)‍(?=\p{Extended_Pictographic})`,
+    // U+200D after a virama, or between a letter and its script's virama, as in the Bengali ra-phala.
+    `(?<=[${Object.values(VIRAMAS).join("")}])\\u200d`,
+    ...Object.entries(VIRAMAS).map(([script, virama]) => `(?<=${letterOf(script)})\\u200d(?=${virama})`),
+    // U+200C between letters of one script that uses it. The left letter may carry marks, such as a virama.
+    ...["Arabic", ...Object.keys(VIRAMAS)].map((script) => `(?<=${letterOf(script)}\\p{M}*)\\u200c(?=${letterOf(script)})`),
+    // Tag characters only in a well-formed subdivision flag, such as England's.
+    String.raw`(?<=\u{1f3f4})[\u{e0030}-\u{e0039}\u{e0061}-\u{e007a}]{3,7}\u{e007f}`,
+    // U+200E and U+200F only in text that has a right-to-left letter.
+    `[\\u200e\\u200f](?:(?<=${RTL_LETTER}[\\s\\S]*)|(?=[\\s\\S]*${RTL_LETTER}))`,
+    // Emoji newer than this runtime's Unicode tables.
+    String.raw`[\p{Cn}&&\p{Extended_Pictographic}]`,
+  ].join("|")})`,
+  "gv",
+);
 const MAX_APPROVABLE = 4000;
 const MAX_APPROVABLE_LINES = 40;
 // Three blank lines in a row, or a long run of spaces, could push text out of view in the dialog.
@@ -78,7 +111,7 @@ const HIDING_GAP = /(?:[^\S\n]*\n){4}|[^\S\n]{40}/;
 /** Length is left to X because the limit depends on the account. */
 export function parseOutgoingText(value: string | undefined): string {
   if (!value?.trim()) throw usage("the text must not be empty");
-  if (DECEPTIVE.test(value.replace(TEXT_JOINER, "").replaceAll("\n", ""))) throw usage("the text contains invisible or control characters; remove them");
+  if (DECEPTIVE.test(value.replace(ORDINARY_FORMAT, "").replaceAll("\n", ""))) throw usage("the text contains invisible or control characters; remove them");
   if (value.length > MAX_APPROVABLE || value.split("\n").length > MAX_APPROVABLE_LINES) {
     throw usage(`the text is over ${MAX_APPROVABLE} characters or ${MAX_APPROVABLE_LINES} lines, too long to review in the approval dialog`);
   }
@@ -90,9 +123,9 @@ export function parseOutgoingText(value: string | undefined): string {
 export function displayText(value: string): string {
   return value
     .replace(/\s+/gu, " ")
-    .split(TEXT_JOINER)
-    .map((part) => Array.from(part, (ch) => (DECEPTIVE.test(ch) ? "\ufffd" : ch)).join(""))
-    .join("\u200d");
+    .split(ORDINARY_FORMAT)
+    .map((part, index) => (index % 2 === 1 ? part : Array.from(part, (ch) => (DECEPTIVE.test(ch) ? "\ufffd" : ch)).join("")))
+    .join("");
 }
 
 export function onePositional(parsed: Parsed, command: string): string | undefined {
