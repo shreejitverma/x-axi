@@ -203,9 +203,6 @@ describe("Linux dialog against a fake executable", () => {
       ["exit 0", "exit 0", "approved"],
       ["exit 1, the Cancel button", "exit 1", "cancelled"],
       ["exit 1 with an unrelated warning", 'echo "Gtk-WARNING **: theme not found" >&2; exit 1', "cancelled"],
-      ["exit 1 from GTK 3 with no display", 'echo "(zenity:7): Gtk-WARNING **: cannot open display: :99" >&2; exit 1', "unavailable"],
-      ["exit 1 from GTK 4 with no display", 'echo "Gtk-WARNING **: Failed to open display" >&2; exit 1', "unavailable"],
-      ["exit 1 from Qt with no display", 'echo "qt.qpa.xcb: could not connect to display :99" >&2; exit 1', "unavailable"],
       ["a display message with exit 0, the only approval signal", 'echo "cannot open display" >&2; exit 0', "approved"],
       ["exit 255", "exit 255", "unavailable"],
       ["exit 3", "exit 3", "unavailable"],
@@ -301,6 +298,19 @@ describe("Linux dialog against a fake executable", () => {
     // This fake reads its exit code from the environment the way real zenity does.
     plant(bin, "zenity", 'exit "${ZENITY_CANCEL:-1}"');
     await expect(ask({ ZENITY_CANCEL: "0" })).resolves.toBe("cancelled");
+  });
+
+  it.each([
+    ["GTK 3", "(zenity:7): Gtk-WARNING **: cannot open display: :99"],
+    ["GTK 4", "Gtk-WARNING **: Failed to open display"],
+  ])("reports zenity exiting 1 on a %s display failure as unavailable, not a cancel", async (_name, message) => {
+    plant(bin, "zenity", `echo "${message}" >&2; exit 1`);
+    await expect(ask()).resolves.toBe("unavailable");
+  });
+
+  it("reads exit 1 from kdialog as Cancel whatever it prints", async () => {
+    plant(bin, "kdialog", 'echo "cannot open display" >&2; exit 1');
+    await expect(ask()).resolves.toBe("cancelled");
   });
 
   it("reports zenity's own timeout exit as timed out, but not the same code from kdialog", async () => {

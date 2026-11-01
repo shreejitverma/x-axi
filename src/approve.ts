@@ -270,13 +270,13 @@ function dialogEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 // GTK exits 1 when it cannot open the display, the same code as the Cancel button. GTK 3 and 4 do not translate these.
-// Qt normally aborts instead, but its message is matched too so no tool can report a failure as a person's answer.
-const DISPLAY_FAILURE = /cannot open display|failed to open display|could not connect to display/i;
+const GTK_DISPLAY_FAILURE = /cannot open display|failed to open display/i;
 const MAX_STDERR_CHARS = 64 * 1024;
 
 function linuxResult(tool: LinuxTool, code: number | null, stderr: string): ApprovalResult {
   if (code === 0) return "approved";
-  if (code === 1) return DISPLAY_FAILURE.test(stderr) ? "unavailable" : "cancelled";
+  if (tool === "zenity" && code === 1 && GTK_DISPLAY_FAILURE.test(stderr)) return "unavailable";
+  if (code === 1) return "cancelled";
   if (tool === "zenity" && code === 5) return "timed_out";
   return "unavailable"; // A crash, a signal, or any other failure.
 }
