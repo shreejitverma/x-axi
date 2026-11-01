@@ -115,7 +115,7 @@ function pagedQuery(limit: number, next: string | true | undefined): string {
 }
 
 export const HELP: Record<string, string> = {
-  me: "usage: x-axi me\nRefreshes and shows your account. Cost about $0.001.",
+  me: "usage: x-axi me\nRefreshes and shows your account. Cost about $0.01.",
   timeline: "usage: x-axi timeline [--limit 5-100] [--next TOKEN] [--full]\nYour recent posts.",
   mentions: "usage: x-axi mentions [--limit 5-100] [--next TOKEN] [--full]\nPosts mentioning you, with a reply_via_api hint.",
   replies: "usage: x-axi replies <post-id-or-url> [--limit 10-100] [--next TOKEN] [--full]\nThe post's conversation. X recent search covers the last 7 days only.",
@@ -197,7 +197,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
     const account = { id: String(data["id"]), username: String(data["username"]) };
     writeAccount(account);
-    spend("me", RATES.ownedRead);
+    spend("me", RATES.userRead);
     return account;
   };
 
@@ -321,8 +321,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
   };
 
-  const createPost = async (text: string, replyTo: string | undefined, account: Account, context?: string): Promise<Output> => {
-    const usd = estimatePostCost(text, replyTo !== undefined);
+  const createPost = async (text: string, replyTo: string | undefined, account: Account, usd: number, context?: string): Promise<Output> => {
     const op = replyTo ? "reply" : "post";
     const check = "Check with `x-axi timeline`";
     await gate(replyTo ? "Reply" : "Post", account, { text }, usd, context);
@@ -458,7 +457,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const parsed = parseArgs(args, "post", []);
       if (parsed.positional.length !== 1) throw usage("quote the post text as one argument", [HELP["post"] as string]);
       const text = parseOutgoingText(parsed.positional[0]);
-      return createPost(text, undefined, await refreshAccount());
+      return createPost(text, undefined, await refreshAccount(), estimatePostCost(text, false));
     },
     reply: async (args) => {
       const parsed = parseArgs(args, "reply", []);
@@ -468,7 +467,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const account = await refreshAccount();
       const parent = await fetchPost(id);
       if (!parent) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
-      return createPost(text, id, account, `Replying to @${parent.author}: ${displayText(truncate(fullText(parent.post), false))}`);
+      const usd = estimatePostCost(text, String(parent.post["author_id"]) !== account.id);
+      return createPost(text, id, account, usd, `Replying to @${parent.author}: ${displayText(truncate(fullText(parent.post), false))}`);
     },
     delete: async (args) => {
       const parsed = parseArgs(args, "delete", []);

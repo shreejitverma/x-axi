@@ -369,6 +369,21 @@ describe("review regressions", () => {
     });
   });
 
+  describe("reply pricing", () => {
+    const parentBy = (authorId: string) => ok({ data: { id: "50", text: "parent", author_id: authorId }, includes: { users: [{ id: authorId, username: "author" }] } });
+
+    it.each([
+      ["your own post, at the Post: Create rate", "1", "thanks", 0.015],
+      ["someone else's post, at the summoned rate", "9", "thanks", 0.01],
+      ["your own post with a URL, at the URL rate", "1", "see https://example.com", 0.2],
+      ["someone else's post with a URL, at the URL rate", "9", "see https://example.com", 0.2],
+    ])("quotes a reply to %s", async (_name, authorId, text, usd) => {
+      const h = harness((c) => (c.method === "GET" ? parentBy(authorId) : ok({ data: { id: "60" } }, 201)));
+      await expect(h.commands["reply"]!(["50", text])).resolves.toMatchObject({ est_cost: `$${usd.toFixed(3)}` });
+      expect(h.requests[0]!.estCostUsd).toBe(usd);
+    });
+  });
+
   describe("read est_cost", () => {
     const recorded = async (h: ReturnType<typeof harness>) =>
       ((await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } }).spend.last_30d_usd;
@@ -382,14 +397,14 @@ describe("review regressions", () => {
 
     it("includes the account lookup on the first timeline, and not on the next", async () => {
       const h = harness(() => ok({ data: [{ id: "5", text: "hi", author_id: "1" }] }));
-      await expect(h.commands["timeline"]!([])).resolves.toMatchObject({ est_cost: "$0.002" });
+      await expect(h.commands["timeline"]!([])).resolves.toMatchObject({ est_cost: "$0.011" });
       await expect(h.commands["timeline"]!([])).resolves.toMatchObject({ est_cost: "$0.001" });
-      expect(await recorded(h)).toBe("0.003");
+      expect(await recorded(h)).toBe("0.012");
     });
 
     it("shows the refresh cost on me", async () => {
       const h = harness(() => PARENT);
-      await expect(h.commands["me"]!([])).resolves.toMatchObject({ est_cost: "$0.001" });
+      await expect(h.commands["me"]!([])).resolves.toMatchObject({ est_cost: "$0.010" });
     });
 
     it("keeps a write's estimate to the write itself", async () => {
@@ -449,6 +464,13 @@ describe("review regressions", () => {
     ["a run of whitespace-only lines", "shown\n \n \n \nhidden"],
     ["a long run of spaces", `shown${" ".repeat(40)}hidden`],
     ["too many short lines", Array.from({ length: 41 }, () => ".").join("\n")],
+    ["lines blank but for a variation selector", `Nice${"\n\ufe0f".repeat(30)}\nBuy`],
+    ["lines blank but for a left-to-right mark", `\u05e9${"\n\u200e".repeat(30)}\nBuy`],
+    ["lines blank but for a right-to-left mark", `\u05e9${"\n\u200f".repeat(30)}\nBuy`],
+    ["spaces split by variation selectors", `shown${" \ufe0f".repeat(200)}hidden`],
+    ["spaces split by direction marks", `\u05e9${" \u200e".repeat(200)}hidden`],
+    ["nothing but a variation selector", "\ufe0f"],
+    ["nothing but direction marks", "\u200f\u200e"],
   ])("refuses outgoing text with %s in post and dm send", async (_name, text) => {
     const h = harness(() => PARENT);
     await expect(h.commands["post"]!([text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
@@ -485,14 +507,14 @@ describe("review regressions", () => {
     const h = harness(respond);
     await expect(h.commands["post"]!(["hello"])).rejects.toMatchObject({ code: "OUTCOME_UNKNOWN" });
     const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } };
-    expect(out.spend.last_30d_usd).toBe("0.016"); // refresh 0.001 + post 0.015
+    expect(out.spend.last_30d_usd).toBe("0.025"); // refresh 0.010 + post 0.015
   });
 
   it("records nothing for a write that X refused", async () => {
     const h = harness(() => ok({ detail: "bad" }, 400));
     await expect(h.commands["post"]!(["hello"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } };
-    expect(out.spend.last_30d_usd).toBe("0.001"); // refresh only
+    expect(out.spend.last_30d_usd).toBe("0.010"); // refresh only
   });
 
   it("keeps ordinary paragraph spacing", async () => {
@@ -915,7 +937,7 @@ describe("spend ledger", () => {
     await h.commands["post"]!(["hello"]);
     await h.commands["api"]!(["/2/users/42"]);
     const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string; unpriced_calls_30d: number } };
-    expect(out.spend.last_30d_usd).toBe("0.016"); // refresh 0.001 + post 0.015
+    expect(out.spend.last_30d_usd).toBe("0.025"); // refresh 0.010 + post 0.015
     expect(out.spend.unpriced_calls_30d).toBe(1);
   });
 });

@@ -22,7 +22,7 @@ export function looksLikeUrl(text: string): boolean {
   return URL_LIKE.test(text);
 }
 
-export function estimatePostCost(text: string, isReply: boolean): number {
+export function estimatePostCost(text: string, summoned: boolean): number {
   if (looksLikeUrl(text)) return RATES.postCreateWithUrl;
-  return isReply ? RATES.summonedReply : RATES.postCreate;
+  return summoned ? RATES.summonedReply : RATES.postCreate;
 }

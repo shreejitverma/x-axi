@@ -107,15 +107,17 @@ const MAX_APPROVABLE = 4000;
 const MAX_APPROVABLE_LINES = 40;
 // Three blank lines in a row, or a long run of spaces, could push text out of view in the dialog.
 const HIDING_GAP = /(?:[^\S\n]*\n){4}|[^\S\n]{40}/;
+const ACCEPTED_BLANK = /[\u200e\u200f\ufe0f]/g;
 
 /** Length is left to X because the limit depends on the account. */
 export function parseOutgoingText(value: string | undefined): string {
-  if (!value?.trim()) throw usage("the text must not be empty");
+  const visible = (value ?? "").replace(ACCEPTED_BLANK, "");
+  if (value === undefined || !visible.trim()) throw usage("the text must not be empty");
   if (DECEPTIVE.test(value.replace(ORDINARY_FORMAT, "").replaceAll("\n", ""))) throw usage("the text contains invisible or control characters; remove them");
   if (value.length > MAX_APPROVABLE || value.split("\n").length > MAX_APPROVABLE_LINES) {
     throw usage(`the text is over ${MAX_APPROVABLE} characters or ${MAX_APPROVABLE_LINES} lines, too long to review in the approval dialog`);
   }
-  if (HIDING_GAP.test(value)) throw usage("the text has a long run of blank lines or spaces; shorten it");
+  if (HIDING_GAP.test(visible)) throw usage("the text has a long run of blank lines or spaces; shorten it");
   return value;
 }
 
