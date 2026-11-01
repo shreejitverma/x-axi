@@ -1,10 +1,11 @@
+import { AxiError } from "axi-sdk-js";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
 import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
-import { createAuth, type AuthService, type AuthStatus, type LogoutReport } from "../src/auth.js";
+import { createAuth, type AuthService, type AuthStatus, type LogoutReport, type RevokeOutcome } from "../src/auth.js";
 import { buildCommands } from "../src/commands.js";
 import { readConfig } from "../src/config.js";
 
@@ -62,11 +63,11 @@ let dir: string;
 beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "x-axi-test-"));
   process.env["X_AXI_STATE_DIR"] = dir;
-  process.env["X_AXI_CONFIG_DIR"] = join(dir, "config");
+  process.env["XDG_CONFIG_HOME"] = join(dir, "config");
 });
 afterEach(() => {
   delete process.env["X_AXI_STATE_DIR"];
-  delete process.env["X_AXI_CONFIG_DIR"];
+  delete process.env["XDG_CONFIG_HOME"];
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -1131,8 +1132,8 @@ describe("account commands", () => {
 
   it("setup uses a 127.0.0.1 redirect_uri on an unprivileged port", async () => {
     for (const uri of ["http://127.0.0.1:1024/callback", "http://127.0.0.1:65535/callback"]) {
-      mkdirSync(join(dir, "config"), { recursive: true });
-      writeFileSync(join(dir, "config", "config.json"), JSON.stringify({ redirect_uri: uri }));
+      mkdirSync(join(dir, "config", "x-axi"), { recursive: true });
+      writeFileSync(join(dir, "config", "x-axi", "config.json"), JSON.stringify({ redirect_uri: uri }));
       const h = harness(() => PARENT);
       const out = (await h.commands["setup"]!([])) as { callback_url: string; steps: string[] };
       expect(out.callback_url).toBe(uri);
@@ -1141,9 +1142,9 @@ describe("account commands", () => {
   });
 
   it("setup and login refuse any other redirect_uri before starting a sign-in", async () => {
-    mkdirSync(join(dir, "config"), { recursive: true });
+    mkdirSync(join(dir, "config", "x-axi"), { recursive: true });
     for (const uri of ["http://localhost:8711/callback", "http://127.0.0.1:99999/callback", "http://127.0.0.1:65536/callback", "http://127.0.0.1:80/callback", "http://127.0.0.1:1023/callback", "http://127.0.0.1/callback", "https://127.0.0.1:8711/callback", "http://127.0.0.1.example.com:8711/callback", 8711]) {
-      writeFileSync(join(dir, "config", "config.json"), JSON.stringify({ redirect_uri: uri }));
+      writeFileSync(join(dir, "config", "x-axi", "config.json"), JSON.stringify({ redirect_uri: uri }));
       const login = vi.fn(async () => STATUS);
       const h = harness(() => PARENT);
       const commands = buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth({ login }) });
@@ -1152,6 +1153,55 @@ describe("account commands", () => {
       await expect(commands["setup"]!([])).rejects.toMatchObject(expected);
       expect(login).not.toHaveBeenCalled();
     }
+  });
+
+  describe("login over a stored login", () => {
+    const relogin = (revokeReplaced: () => Promise<RevokeOutcome>, request: XClient["request"] = async () => ME) => {
+      const h = harness(() => PARENT);
+      return buildCommands({ client: { request }, approve: h.approve, auth: fakeAuth({ login: async () => ({ ...STATUS, revokeReplaced }) }) })["login"]!(["--client-id", "client-id-1234"]);
+    };
+    const cacheAccount = (id: string, username: string) => writeFileSync(join(dir, "account.json"), JSON.stringify({ id, username }));
+    const revoked = () => vi.fn(async () => ({ revoked: ["access_token", "refresh_token"], revoke_failed: {} }));
+
+    it("revokes the old tokens when the account changed", async () => {
+      cacheAccount("2", "previous");
+      const revoke = revoked();
+      await expect(relogin(revoke)).resolves.toMatchObject({ login: { account: "@shreejit" }, earlier_login: "revoked the tokens of @previous at X" });
+      expect(revoke).toHaveBeenCalledTimes(1);
+    });
+
+    it("reports a failed revocation for the old account", async () => {
+      cacheAccount("2", "previous");
+      const out = await relogin(async () => ({ revoked: ["access_token"], revoke_failed: { refresh_token: "invalid_request" } }));
+      expect(out).toMatchObject({ login: { account: "@shreejit" }, earlier_login: expect.stringContaining("refresh_token: invalid_request") });
+      expect(out["earlier_login"]).toContain("connected_apps");
+    });
+
+    it("leaves the old tokens live and says so when the account is the same or unknown", async () => {
+      for (const prepare of [() => cacheAccount("1", "shreejit"), () => rmSync(join(dir, "account.json"), { force: true }), () => writeFileSync(join(dir, "account.json"), "{}")]) {
+        prepare();
+        const revoke = revoked();
+        const out = await relogin(revoke);
+        expect(revoke).not.toHaveBeenCalled();
+        expect(out["earlier_login"]).toContain("stay live");
+        expect(out["earlier_login"]).toContain("`x-axi logout` before `x-axi login`");
+      }
+    });
+
+    it("leaves the old tokens live and says so when the new account cannot be read", async () => {
+      cacheAccount("2", "previous");
+      const revoke = revoked();
+      const error = await relogin(revoke, async () => ok({ detail: "client-not-enrolled" }, 403)).catch((e: AxiError) => e);
+      expect(revoke).not.toHaveBeenCalled();
+      expect((error as AxiError).message).toContain("stored the login");
+      expect((error as AxiError).suggestions.join("\n")).toContain("stay live");
+    });
+
+    it("says nothing about an earlier login when none was replaced", async () => {
+      const h = harness(() => PARENT);
+      const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth() })["login"]!(["--client-id", "client-id-1234"]);
+      expect(out).not.toHaveProperty("earlier_login");
+    });
   });
 
   it("logout reports a failed revocation next to the deletion", async () => {

@@ -156,11 +156,13 @@ export const HELP: Record<string, string> = {
   spend: "usage: x-axi spend\nLocal upper-bound estimate of API spend. No API call.",
   api: "usage: x-axi api </2/path?query>\nRaw GET for read endpoints without a command. Spend is not estimated. Writes are not available here.",
   setup: "usage: x-axi setup\nShows login state, the keystore, and the exact X portal steps. No API call.",
-  login: "usage: x-axi login [--client-id ID]\nSigns in to X in your browser with OAuth 2.0 PKCE and stores the login in the OS keystore. Run it yourself in a terminal, never through an agent. The client ID comes from --client-id or the config file, and the flag's value is saved to the config file. Then fetches your account, about $0.01.",
+  login: "usage: x-axi login [--client-id ID]\nSigns in to X in your browser with OAuth 2.0 PKCE and stores the login in the OS keystore. Run it yourself in a terminal, never through an agent. The client ID comes from --client-id or the config file, and the flag's value is saved to the config file. Then fetches your account, about $0.01. A login that replaces another account's stored login revokes the old tokens; one that replaces the same account's leaves them live and says so, so run `x-axi logout` first after a suspected leak.",
   logout: "usage: x-axi logout\nRevokes the tokens at X and deletes the stored login. No approval dialog; deleting is reported even when revocation fails.",
   auth: "usage: x-axi auth status\nShows the account, scopes, access token expiry, and where the login is stored. Never shows a token. No API call.",
   update: "usage: x-axi update\nShows how to update from your git checkout. It installs nothing.",
 };
+
+const EARLIER_TOKENS_LIVE = "The earlier login's tokens stay live at X, because revoking them could also end this login. After a suspected leak, run `x-axi logout` before `x-axi login`, which revokes them; to end them now, revoke the app at https://x.com/settings/connected_apps and log in again";
 
 /** Setup must take a public user from nothing to a working login, so these name the exact portal fields. */
 export function setupSteps(redirectUri: string): string[] {
@@ -647,6 +649,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const clientId = flag !== undefined ? parseClientId(flag, "--client-id") : config.client_id;
       if (!clientId) throw usage("no client ID: pass --client-id, or put client_id in the config file", [SETUP_HINT]);
       const status = await deps.auth.login(clientId);
+      const previous = readAccount();
       // From here the login is stored, so every later problem is reported as a warning or with that fact attached.
       try {
         clearAccount(); // The cache may name the previous login's account.
@@ -664,6 +667,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       try {
         account = await refreshAccount();
       } catch (error) {
+        if (status.revokeReplaced) warnings.add(EARLIER_TOKENS_LIVE);
         const known = error instanceof AxiError;
         throw new AxiError(
           `signed in and stored the login, but could not read the account: ${known ? error.message : String(error)}`,
@@ -671,8 +675,21 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
           [...(known ? error.suggestions : []), "The login is stored; run `x-axi me` once the cause above is fixed"],
         );
       }
+      let earlierLogin: string | undefined;
+      if (status.revokeReplaced) {
+        if (previous?.id && previous.id !== account.id) {
+          const { revoke_failed: failed } = await status.revokeReplaced();
+          const failures = Object.entries(failed).map(([kind, reason]) => `${kind}: ${reason}`);
+          earlierLogin = failures.length
+            ? `could not revoke every token of @${previous.username} at X (${failures.join("; ")}); revoke the app at https://x.com/settings/connected_apps while signed in to that account`
+            : `revoked the tokens of @${previous.username} at X`;
+        } else {
+          earlierLogin = EARLIER_TOKENS_LIVE;
+        }
+      }
       return {
         login: { account: `@${account.username}`, scopes: status.scopes, access_token_expires_at: status.access_token_expires_at, storage: status.storage },
+        ...(earlierLogin ? { earlier_login: earlierLogin } : {}),
         est_cost: money(recorded),
         help: ["Run `x-axi mentions` to see who mentioned you", "Run `x-axi auth status` any time to see this login without an API call"],
       };

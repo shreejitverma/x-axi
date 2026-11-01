@@ -334,6 +334,28 @@ describe("login", () => {
     expect(x.requests.filter((r) => r.path === "/revoke").map((r) => r.form["token"])).toEqual([ACCESS, REFRESH]);
   });
 
+  it("keeps the replaced login's tokens revocable without revoking them or exposing them", async () => {
+    const old = credentials({ access_token: "OLD_ACCESS", refresh_token: "OLD_REFRESH", client_id: "client-id-1234" });
+    const m = memoryStore(old);
+    const result = await auth(m.store).service.login("client-id-1234");
+    expect(x.requests.filter((r) => r.path === "/revoke")).toEqual([]);
+    expect(JSON.parse(m.current()!)).toMatchObject({ access_token: ACCESS, refresh_token: REFRESH });
+    expect(JSON.stringify(result)).not.toContain("OLD_");
+    await expect(result.revokeReplaced!()).resolves.toEqual({ revoked: ["access_token", "refresh_token"], revoke_failed: {} });
+    expect(x.requests.filter((r) => r.path === "/revoke").map((r) => r.form)).toEqual([
+      { token: "OLD_ACCESS", token_type_hint: "access_token", client_id: "client-id-1234" },
+      { token: "OLD_REFRESH", token_type_hint: "refresh_token", client_id: "client-id-1234" },
+    ]);
+    expect(JSON.parse(m.current()!)).toMatchObject({ access_token: ACCESS, refresh_token: REFRESH });
+  });
+
+  it("offers no revocation when nothing readable was replaced", async () => {
+    for (const initial of [undefined, "garbage"]) {
+      const result = await auth(memoryStore(initial).store).service.login("client-id-1234");
+      expect(result).not.toHaveProperty("revokeReplaced");
+    }
+  });
+
   it("reports a busy callback port", async () => {
     const blocker = createServer();
     await new Promise<void>((r) => blocker.listen(8711, "127.0.0.1", r));

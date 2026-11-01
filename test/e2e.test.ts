@@ -36,7 +36,7 @@ function run(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ out: string
     execFile(
       process.execPath,
       [BIN, ...args],
-      { env: { ...process.env, X_AXI_API_BASE: base, X_AXI_STATE_DIR: dir, X_AXI_CONFIG_DIR: join(dir, "config"), ...env } },
+      { env: { ...process.env, X_AXI_API_BASE: base, X_AXI_STATE_DIR: dir, XDG_CONFIG_HOME: join(dir, "config"), ...env } },
       (error, stdout) => done({ out: stdout, code: error ? Number(error.code) : 0 }),
     );
   });

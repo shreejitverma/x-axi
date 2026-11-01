@@ -31,7 +31,7 @@ To update, run `git pull && pnpm install --frozen-lockfile && pnpm run build` in
 6. Verify with `x-axi auth status`, then `x-axi me`.
 
 The client ID is not a secret.
-`login` saves it to `~/.config/x-axi/config.json` (or `$XDG_CONFIG_HOME/x-axi/config.json`, or `$X_AXI_CONFIG_DIR/config.json`), so later runs need no flag.
+`login` saves it to `~/.config/x-axi/config.json` (or `$XDG_CONFIG_HOME/x-axi/config.json`), so later runs need no flag.
 If port 8711 is taken, set `redirect_uri` in the same file to another `http://127.0.0.1` URL with a port from 1024 to 65535.
 Register that exact URI as the Callback URI in the X portal as well, because X refuses a login whose callback differs; `x-axi setup` prints the URI in use.
 
@@ -79,6 +79,9 @@ Before each API call x-axi reads the record and, within two minutes of expiry, r
 A file lock in the state directory (`auth.lock`, carrying a random owner token and touched every five seconds while held) serialises refreshes, logins, and logouts across x-axi processes, so a single-use refresh token is spent once and a logout cannot be undone by a refresh that was already in flight.
 A lock untouched for a minute is treated as left by a crashed process and claimed atomically.
 The new record is written to the keystore before the new token is used; if that write fails after X has already rotated the token, the command says so and asks for a new login rather than hiding it, and makes one attempt to revoke the tokens it could not keep.
+When `login` replaces a stored login for a different account, it revokes the old tokens after saving the new ones and reports whether that worked.
+When it replaces a login for the same account, or the old account is not known because no account is cached or the new one could not be read, it leaves the old tokens live and says so, because whether revoking them would also end the new grant is unverified.
+After a suspected leak, run `x-axi logout` before `x-axi login`, which revokes the tokens while x-axi still holds them; once they are replaced, only revoking the app at <https://x.com/settings/connected_apps> ends them.
 `login` reads the keystore before it opens the browser, so a missing or locked keystore stops it before any consent, and if the final save still fails it makes the same attempt to revoke and reports the result.
 If X rejects the refresh token, the command fails with `AUTH_REQUIRED` and the stored login is left in place for you to inspect with `auth status` or remove with `logout`; nothing is cleared silently and nothing is retried.
 A rate limit or an unusable answer from the token endpoint is reported as `X_UNAVAILABLE` and changes nothing.

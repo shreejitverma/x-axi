@@ -38,10 +38,17 @@ export interface LogoutReport {
   deleted: boolean;
 }
 
+export type RevokeOutcome = Pick<LogoutReport, "revoked" | "revoke_failed">;
+
+export interface LoginResult extends AuthStatus {
+  /** Present when this login replaced a readable record. Best effort: it reports failures instead of throwing. */
+  revokeReplaced?: () => Promise<RevokeOutcome>;
+}
+
 export interface AuthService {
   /** A usable access token, refreshed when near expiry. Never retries X. */
   accessToken(): Promise<string>;
-  login(clientId: string): Promise<AuthStatus>;
+  login(clientId: string): Promise<LoginResult>;
   logout(): Promise<LogoutReport>;
   status(): Promise<AuthStatus>;
 }
@@ -215,7 +222,7 @@ export function createAuth(deps: AuthDeps): AuthService {
     }
   };
 
-  const revokeAll = async (credentials: Credentials): Promise<Pick<LogoutReport, "revoked" | "revoke_failed">> => {
+  const revokeAll = async (credentials: Credentials): Promise<RevokeOutcome> => {
     const outcome = { revoked: [] as string[], revoke_failed: {} as Record<string, string> };
     const tokens: ["access_token" | "refresh_token", string | undefined][] = [
       ["access_token", credentials.access_token],
@@ -282,6 +289,32 @@ export function createAuth(deps: AuthDeps): AuthService {
     access_token: new Date(credentials.expires_at).getTime() > now() ? "valid" : "expired",
     refresh_token: credentials.refresh_token ? "present" : "absent",
   });
+
+  /** A record the backend cannot decode can still be replaced, so it reads as no record here. */
+  const readReplaceable = async (): Promise<string | undefined> => {
+    try {
+      return await deps.store.read();
+    } catch (error) {
+      if (error instanceof AxiError && error.code === "KEYSTORE_CORRUPT") return undefined;
+      throw error;
+    }
+  };
+
+  /** Returns the record this replaced. Under the lock, so a refresh in another process cannot write that login back over this one. */
+  const saveLogin = async (credentials: Credentials): Promise<Credentials | undefined> => {
+    try {
+      return await withCredentialLock(async () => {
+        const raw = await readReplaceable();
+        await deps.store.write(JSON.stringify(credentials));
+        return raw === undefined ? undefined : parseCredentials(raw);
+      });
+    } catch (error) {
+      const known = error instanceof AxiError;
+      const reason = known ? error.message : String(error);
+      const discarded = await discardUnsaved(credentials);
+      throw new AxiError(`X granted the login, but it could not be saved (${scrub(reason, [credentials.access_token, credentials.refresh_token])}); ${discarded}`, known ? error.code : "KEYSTORE_ERROR", known ? error.suggestions : []);
+    }
+  };
 
   /** One loopback server for one login. It answers the browser, then closes. */
   const waitForCode = (state: string, onListening: () => void): Promise<string> =>
@@ -360,11 +393,7 @@ export function createAuth(deps: AuthDeps): AuthService {
 
     async login(clientId) {
       // Before the browser: a keystore that cannot be read will not keep the tokens X is about to issue.
-      try {
-        await deps.store.read();
-      } catch (error) {
-        if (!(error instanceof AxiError && error.code === "KEYSTORE_CORRUPT")) throw error;
-      }
+      await readReplaceable();
       const verifier = randomVerifier();
       const state = randomState();
       const url = authorizeUrl(deps.endpoints.authorize, { clientId, redirectUri: deps.redirectUri, scopes: SCOPES, state, codeChallenge: codeChallenge(verifier) });
@@ -387,16 +416,8 @@ export function createAuth(deps: AuthDeps): AuthService {
         throw new AxiError(`X's token endpoint gave no usable answer (${scrub(error.message, [])}); nothing was stored`, "X_UNAVAILABLE", ["Run `x-axi login` again later"]);
       }
       const credentials = fromTokens(tokens, clientId, undefined, now());
-      // Under the lock, so a refresh in another process cannot write the previous login back over this one.
-      try {
-        await withCredentialLock(() => deps.store.write(JSON.stringify(credentials)));
-      } catch (error) {
-        const known = error instanceof AxiError;
-        const reason = known ? error.message : String(error);
-        const discarded = await discardUnsaved(credentials);
-        throw new AxiError(`X granted the login, but it could not be saved (${scrub(reason, [credentials.access_token, credentials.refresh_token])}); ${discarded}`, known ? error.code : "KEYSTORE_ERROR", known ? error.suggestions : []);
-      }
-      return describe(credentials);
+      const replaced = await saveLogin(credentials);
+      return replaced ? { ...describe(credentials), revokeReplaced: () => revokeAll(replaced) } : describe(credentials);
     },
 
     logout() {

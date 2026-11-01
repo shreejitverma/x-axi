@@ -13,8 +13,6 @@ export interface Config {
 export const DEFAULT_REDIRECT_URI = "http://127.0.0.1:8711/callback";
 
 export function configDir(): string {
-  const override = process.env["X_AXI_CONFIG_DIR"];
-  if (override) return override;
   const xdg = process.env["XDG_CONFIG_HOME"];
   return join(xdg || join(homedir(), ".config"), "x-axi");
 }
