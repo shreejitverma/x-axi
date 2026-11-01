@@ -38,6 +38,16 @@ export interface MediaFile {
   modifiedAt: number;
 }
 
+// ftyp major brands of plain MP4 files, from the MP4 Registration Authority (mp4ra.org). HEIC, AVIF, M4A, and 3GP share the container but are not on it.
+const MP4_BRANDS = new Set(["isom", "iso2", "iso3", "iso4", "iso5", "iso6", "mp41", "mp42", "avc1", "M4V ", "M4VH", "M4VP", "dash", "MSNV", "XAVC"]);
+const EBML_DOCTYPE_ID = Buffer.from([0x42, 0x82]);
+
+/** The EBML header holds the DocType, which separates WebM from other Matroska files. */
+function isWebm(header: Buffer): boolean {
+  const id = header.indexOf(EBML_DOCTYPE_ID);
+  return id !== -1 && header.toString("latin1", id + 3, id + 7) === "webm";
+}
+
 /** The file's own bytes decide its type, so a renamed file cannot pass as something else. */
 function sniff(header: Buffer): string | undefined {
   const ascii = (start: number, end: number): string => header.toString("latin1", start, end);
@@ -45,8 +55,12 @@ function sniff(header: Buffer): string | undefined {
   if (header[0] === 0x89 && ascii(1, 4) === "PNG") return "image/png";
   if (ascii(0, 4) === "GIF8") return "image/gif";
   if (ascii(0, 4) === "RIFF" && ascii(8, 12) === "WEBP") return "image/webp";
-  if (ascii(4, 8) === "ftyp") return ascii(8, 12) === "qt  " ? "video/quicktime" : "video/mp4";
-  if (header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return "video/webm";
+  if (ascii(4, 8) === "ftyp") {
+    const brand = ascii(8, 12);
+    if (brand === "qt  ") return "video/quicktime";
+    return MP4_BRANDS.has(brand) ? "video/mp4" : undefined;
+  }
+  if (header.subarray(0, 4).equals(Buffer.from([0x1a, 0x45, 0xdf, 0xa3]))) return isWebm(header) ? "video/webm" : undefined;
   return undefined;
 }
 
@@ -56,7 +70,7 @@ function mb(bytes: number): string {
 
 /** Checks everything knowable without spending. Video duration is not knowable here, so X judges that. */
 export function inspectMedia(path: string): MediaFile {
-  const header = Buffer.alloc(16);
+  const header = Buffer.alloc(64);
   let size: number;
   let modifiedAt: number;
   try {

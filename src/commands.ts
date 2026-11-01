@@ -170,8 +170,8 @@ export const HELP: Record<string, string> = {
   search: "usage: x-axi search <query> [--limit 10-100] [--next TOKEN] [--full]\nRecent search, last 7 days. Each result costs about $0.005.",
   user: "usage: x-axi user <handle>",
   dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text> [--dry-run]   (needs your approval)\nEncrypted XChat conversations are not covered.",
-  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and --all stops at the cap. --all writes a JSON array that follow-file can read, and never overwrites a file.",
-  followers: "usage: x-axi followers [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi followers [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts following a user; yours without a handle. Costs and caps as for `following`.",
+  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and --all stops at the cap. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
+  followers: "usage: x-axi followers [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi followers [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts following a user; yours without a handle. Costs, caps, and the unfiltered --all export as for `following`.",
   "follow-plan": "usage: x-axi follow-plan <handle> --out queue.json [--max-spend USD] [--include-protected]\nReads that account's following and your own following once, removes accounts you already follow and yourself, and writes a queue for follow-file. Protected accounts go to <out>.protected.json instead of the queue unless you pass --include-protected. Writes nothing to X. About $0.01 per account listed, $0.001 on your own list when you own the app, and $0.02 for the two lookups that give the totals. An estimate above $1 refuses without a --max-spend that covers it. Never overwrites a file, and writes no queue from an incomplete read.",
   post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
   reply: "usage: x-axi reply <post-id-or-url> <text> [--media FILE] [--dry-run]\nOpens an approval dialog showing the parent post. X allows this only on your own posts or when the author mentioned or quoted you. --media and --dry-run work as on `post`.",
@@ -502,7 +502,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     } catch (error) {
       if (!(error instanceof AxiError)) throw error;
       const hints: string[] = [];
-      if (quote && error.code === "FORBIDDEN") hints.push("X's create-post docs say quote-posting needs an Enterprise plan and is not on self-serve tiers");
+      if (quote && (error.code === "FORBIDDEN" || error.code === "APP_NOT_ENROLLED")) hints.push("X's create-post docs say quote-posting needs an Enterprise plan and is not on self-serve tiers");
       if (mediaId) hints.push(`Media ${mediaId} finished uploading; X checks its limits again when it is attached to a post, including a video's duration`);
       throw hints.length ? new AxiError(error.message, error.code, [...error.suggestions, ...hints]) : error;
     }
@@ -568,7 +568,6 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   /** Sizes every page to what the cap still allows, so even a wrong total cannot spend past it. A failure keeps what was already paid for. */
   const readAllUsers = async (target: ListTarget, side: ListSide, op: string, cap: number, start?: string): Promise<ReadAll> => {
     const out: ReadAll = { rows: [], partial: 0 };
-    if (target.total === 0) return out;
     let token = start;
     for (;;) {
       const room = Math.floor((cap - recorded) / target.rate + 1e-9);
@@ -662,7 +661,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       ...(result.stopped ? { stopped: result.stopped } : {}),
       ...(result.next ? { next_token: result.next } : {}),
       est_cost: money(recorded),
-      ...(result.stopped ? { help: [result.next ? `The file holds what was read. Continue into a new file with --next ${result.next}; raise --max-spend if the cap stopped it` : "The file holds what was read"] } : {}),
+      help: [
+        ...(result.stopped ? [result.next ? `The file holds what was read. Continue into a new file with --next ${result.next}; raise --max-spend if the cap stopped it` : "The file holds what was read"] : []),
+        "This export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan <handle> --out queue.json`",
+      ],
     };
   };
 
@@ -779,7 +781,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const body = reposted ? { tweet_id: id } : undefined;
     if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method, path, ...(body ? { body } : {}) }], null, recorded, { target: content });
     await gate(action, account, { content }, null);
-    const check = `Check with \`x-axi view ${id}\``;
+    const check = `\`x-axi view\` shows only the post's total repost count, so check your reposts at https://x.com/${account.username}`;
     const response = await send(method, path, body, name, null, check);
     if ((response.body["data"] as Json | undefined)?.["retweeted"] !== reposted) throw outcomeUnknown(`X did not confirm the ${name}`, check);
     return { post: { id, status: reposted ? "reposted" : "not reposted" } };

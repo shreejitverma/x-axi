@@ -64,7 +64,16 @@ afterEach(() => {
 });
 
 const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
-const MP4_HEADER = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypmp42")]);
+const ftyp = (brand: string): Buffer => Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from(`ftyp${brand}`)]);
+const MP4_HEADER = ftyp("mp42");
+const EBML_MAGIC = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+const EBML_VERSIONS = [0x4286, 0x42f7, 0x42f2, 0x42f3].flatMap((id) => [id >> 8, id & 0xff, 0x81, id === 0x42f2 ? 4 : id === 0x42f3 ? 8 : 1]);
+// EBML layouts from the Matroska spec: the header size as one byte (libwebm) or eight (FFmpeg).
+const ebml = (docType: string, longSize = false): Buffer => {
+  const body = Buffer.concat([Buffer.from(EBML_VERSIONS), Buffer.from([0x42, 0x82, 0x80 | docType.length]), Buffer.from(docType)]);
+  const size = longSize ? Buffer.from([0x01, 0, 0, 0, 0, 0, 0, body.length]) : Buffer.from([0x80 | body.length]);
+  return Buffer.concat([EBML_MAGIC, size, body]);
+};
 
 function file(name: string, header: Buffer, size: number): string {
   const path = join(dir, name);
@@ -273,6 +282,16 @@ describe("post --quote", () => {
     expect(error.suggestions.join(" ")).toContain("Enterprise");
   });
 
+  it("names the Enterprise requirement when X refuses with the client-forbidden shape, and only for a quote", async () => {
+    const refused = (c: Call): ApiResponse => (c.method === "GET" ? PARENT : ok({ detail: "client-forbidden" }, 403));
+    const quoted = await harness(refused).commands["post"]!(["my take", "--quote", "50"]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(quoted.code).toBe("APP_NOT_ENROLLED");
+    expect(quoted.suggestions.join(" ")).toContain("Enterprise");
+    const plain = await harness(refused).commands["post"]!(["my take"]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(plain.code).toBe("APP_NOT_ENROLLED");
+    expect(plain.suggestions.join(" ")).not.toContain("Enterprise");
+  });
+
   it("refuses a missing post before the dialog", async () => {
     const h = harness(() => ok({ errors: [{ title: "Not Found Error" }] }));
     await expect(h.commands["post"]!(["my take", "--quote", "50"])).rejects.toMatchObject({ code: "NOT_FOUND" });
@@ -347,6 +366,14 @@ describe("post --media", () => {
     ["a GIF over 15 MiB", () => file("big.gif", Buffer.from("GIF89a"), 15 * 1024 * 1024 + 1)],
     ["an unknown type", () => file("notes.png", Buffer.from("hello world"), 100)],
     ["a renamed file", () => file("clip.png", MP4_HEADER, 100)],
+    ["a HEIC photo", () => file("photo.heic", ftyp("heic"), 100)],
+    ["a HEIC photo renamed to .mp4", () => file("photo.mp4", ftyp("heic"), 100)],
+    ["an AVIF image renamed to .mp4", () => file("photo.mp4", ftyp("avif"), 100)],
+    ["an M4A audio file renamed to .mp4", () => file("song.mp4", ftyp("M4A "), 100)],
+    ["a 3GP video renamed to .mp4", () => file("clip.mp4", ftyp("3gp4"), 100)],
+    ["a Matroska video", () => file("clip.mkv", ebml("matroska"), 100)],
+    ["a Matroska video renamed to .webm", () => file("clip.webm", ebml("matroska"), 100)],
+    ["an EBML file with no DocType", () => file("clip.webm", EBML_MAGIC, 100)],
     ["an empty file", () => file("none.png", Buffer.alloc(0), 0)],
     ["a missing file", () => join(dir, "missing.png")],
     ["a directory", () => dir],
@@ -355,6 +382,31 @@ describe("post --media", () => {
     await expect(h.commands["post"]!(["hi", "--media", path()])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     expect(h.calls).toEqual([]);
     expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["isom", "clip.mp4", ftyp("isom"), "video/mp4"],
+    ["iso5", "clip.mp4", ftyp("iso5"), "video/mp4"],
+    ["mp41", "clip.mp4", ftyp("mp41"), "video/mp4"],
+    ["avc1", "clip.mp4", ftyp("avc1"), "video/mp4"],
+    ["M4V", "clip.m4v", ftyp("M4V "), "video/mp4"],
+    ["qt", "clip.mov", ftyp("qt  "), "video/quicktime"],
+    ["WebM with a one-byte header size", "clip.webm", ebml("webm"), "video/webm"],
+    ["WebM with an eight-byte header size", "clip.webm", ebml("webm", true), "video/webm"],
+  ])("detects %s", async (_name, name, header, mediaType) => {
+    const h = harness(mediaApi());
+    await h.commands["post"]!(["hi", "--media", file(name, header, 100)]);
+    expect(h.calls.find((c) => c.path.endsWith("initialize"))!.body).toMatchObject({ media_type: mediaType, media_category: "tweet_video" });
+  });
+
+  it.each([
+    ["HEIC", "photo.heic", ftyp("heic")],
+    ["Matroska", "clip.mkv", ebml("matroska")],
+  ])("does not advise renaming %s to a type it is not", async (_name, name, header) => {
+    const h = harness(mediaApi());
+    const error = await h.commands["post"]!(["hi", "--media", file(name, header, 100)]).catch((e: Error) => e);
+    expect((error as Error).message).toContain("not a supported file");
+    expect((error as Error).message).not.toContain("rename");
   });
 
   it("accepts an image at exactly the limit", async () => {
@@ -468,6 +520,19 @@ describe("repost and unrepost", () => {
     const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { retweeted: false } })));
     await expect(h.commands["repost"]!(["50"])).rejects.toMatchObject({ code: "OUTCOME_UNKNOWN" });
   });
+
+  it.each([
+    ["repost", "no confirmation", { data: { retweeted: false } }, 200],
+    ["repost", "a server failure", { detail: "boom" }, 503],
+    ["unrepost", "no confirmation", { data: { retweeted: true } }, 200],
+    ["unrepost", "a server failure", { detail: "boom" }, 503],
+  ] as const)("after %s and %s, names a check that shows this account's reposts", async (command, _case, body, status) => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok(body, status)));
+    const error = await h.commands[command]!(["50"]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe("OUTCOME_UNKNOWN");
+    expect(error.suggestions[0]).toContain("https://x.com/shreejit");
+    expect(error.suggestions[0]).not.toContain("x-axi view 50");
+  });
 });
 
 describe("following and followers", () => {
@@ -549,7 +614,7 @@ describe("following and followers", () => {
     expect(h.calls).toEqual([]);
   });
 
-  it("--all exports every page to a file follow-file can read", async () => {
+  it("--all exports every page, and says the export is not a follow queue", async () => {
     const out = join(dir, "export.json");
     const h = harness(lists({ "2": bob(manyUsers(2500)) }));
     const result = await h.commands["following"]!(["bob", "--all", "--out", out, "--max-spend", "26"]);
@@ -557,8 +622,15 @@ describe("following and followers", () => {
     expect(h.reads().filter((c) => c.path.includes("/following"))).toHaveLength(3);
     const rows = JSON.parse(readFileSync(out, "utf8")) as Json[];
     expect(rows).toHaveLength(2500);
-    const dry = await h.commands["follow-file"]!([out, "--dry-run", "--max", "1"]);
-    expect(dry).toMatchObject({ dry_run: { batch: [{ id: "1000", username: "user1000" }] } });
+    expect((result["help"] as string[]).join(" ")).toContain("x-axi follow-plan");
+  });
+
+  it("--all reads the list even when X's count wrongly says it is empty", async () => {
+    const out = join(dir, "export.json");
+    const h = harness(lists({ "2": { counts: { username: "bob", following_count: 0 }, following: manyUsers(3) } }));
+    const result = await h.commands["following"]!(["bob", "--all", "--out", out]);
+    expect(result).toMatchObject({ export: { written: 3, complete: true } });
+    expect(JSON.parse(readFileSync(out, "utf8"))).toHaveLength(3);
   });
 
   it("--all refuses up front when the total exceeds the cap, reading no page and writing no file", async () => {
@@ -690,6 +762,24 @@ describe("following and followers", () => {
       const h = harness(lists(accounts));
       await expect(h.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "1"])).rejects.toMatchObject({ code: "SPEND_CAP" });
       expect(existsSync(out)).toBe(false);
+    });
+
+    it("still removes accounts you follow when X's count of your follows wrongly reads 0", async () => {
+      const out = join(dir, "queue.json");
+      const accounts = plan([user(10)], [user(10), user(12)]);
+      accounts["1"]!.counts = { following_count: 0 };
+      const h = harness(lists(accounts));
+      const result = await h.commands["follow-plan"]!(["bob", "--out", out]);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual([{ id: "12", username: "user12" }]);
+      expect(result).toMatchObject({ follow_plan: { your_following: 1, already_followed: 1, queued: 1 } });
+    });
+
+    it("still reads the target's list when X's count of it wrongly reads 0", async () => {
+      const out = join(dir, "queue.json");
+      const accounts = plan([], [user(12)]);
+      accounts["2"]!.counts = { username: "bob", following_count: 0 };
+      const h = harness(lists(accounts));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out])).resolves.toMatchObject({ follow_plan: { queued: 1 } });
     });
 
     it("warns when X lists fewer of your follows than its count", async () => {

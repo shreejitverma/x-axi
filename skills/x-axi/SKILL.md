@@ -57,3 +57,4 @@ X can lock accounts for aggressive following, so never loop around `follow-file`
 `follow-file` counts an account as already followed only if this login followed it through x-axi.
 Build every queue with `x-axi follow-plan <handle> --out queue.json`, which removes accounts the user already follows and holds protected accounts out, or those accounts are followed and billed again.
 Never filter a queue by hand or call the following endpoints another way to build one.
+A `following --all --out` export is unfiltered, so never pass one to `follow-file`.
