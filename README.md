@@ -11,6 +11,7 @@ cd ~/github/x-axi && pnpm install --frozen-lockfile && pnpm run build && npm lin
 ```
 
 Node 20 or newer.
+The install uses pnpm 11, which itself needs Node 22.13 or newer; on an older Node, install pnpm's standalone `@pnpm/exe` build, which brings its own Node.
 To update, run `git pull && pnpm install --frozen-lockfile && pnpm run build` in the checkout.
 `x-axi update` only prints this, because the `x-axi` name on npm does not belong to this project.
 
@@ -109,13 +110,13 @@ Keep spend limits set in the console.
 
 ## Safety model
 
-Every write opens a native macOS dialog showing the account, parent post, and estimated cost.
+Every write opens a native dialog showing the account, parent post, and estimated cost.
 Outgoing text appears in full under a tool-written header with its exact character and line counts, so all of those lines are sent, whatever they say about themselves.
 Invisible characters are refused except where a language or emoji needs them: zero-width joiners in emoji and Indic script text, zero-width non-joiners in Arabic and Indic script text, tag characters in subdivision flags, and direction marks in right-to-left text.
 Bidi embeddings, overrides, and isolates are always refused.
 The gate lives in the tool, so it applies under every harness and permission mode, including unattended runs.
-It fails closed: Cancel, a 120-second timeout, or a missing dialog sends nothing.
-Linux has no dialog yet, so there reads work and every write stops with `APPROVAL_UNAVAILABLE`.
+It fails closed: Cancel, a 120-second timeout, a crash, or a missing dialog sends nothing.
+There is no terminal prompt, flag, or environment override, because an agent could answer or set those.
 Writes are never retried, because a retry after a lost response could publish twice.
 A failed response that might have been applied returns `OUTCOME_UNKNOWN`.
 
@@ -138,6 +139,39 @@ Checked against the [changelog](https://docs.x.com/changelog) and [pricing](http
 - Media upload is not implemented yet.
 - The OAuth documentation does not say whether refresh tokens rotate, so x-axi treats each as single-use and stores whatever X returns.
 
+## Platform support for writes
+
+| Platform | Approval dialog | Default button |
+|---|---|---|
+| macOS | `/usr/bin/osascript` | Cancel |
+| Linux desktop | `zenity`, or `kdialog` if `zenity` is missing | Cancel on `zenity`; not Cancel on `kdialog` |
+| Linux without a graphical session, such as plain SSH or CI | None, so writes return `APPROVAL_UNAVAILABLE` naming what to install | |
+| Windows and other systems | None, so writes return `APPROVAL_UNSUPPORTED_PLATFORM` | |
+
+On Linux:
+
+- A graphical session means `DISPLAY` or `WAYLAND_DISPLAY` is set, so SSH with X forwarding counts and shows the dialog on the forwarded display.
+- The tools are found only in `/usr/bin`, `/bin`, and `/usr/local/bin`, never through `PATH`, so copies from Nix, Flatpak, or Snap are not used.
+- The tool gets a short list of display and locale variables and nothing else, because variables such as `ZENITY_CANCEL=0` or `LD_PRELOAD` could turn a Cancel into an approval.
+- `kdialog` has no flag for the default button, so pressing Enter may approve; install `zenity` if you can.
+- `kdialog` has no plain text mode, so x-axi sends it escaped rich text, and it has no timeout flag, so x-axi kills it at the timeout.
+- The dialog holds about 25 lines of 50 columns.
+  That is a conservative estimate rather than a measurement of the window, and macOS does not apply it.
+- A word or URL wider than a line is split in the dialog with a `↵` mark at each break, and the dialog counts the breaks; the text sent to X is unchanged.
+- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or a file path, is cut to fit with a marker giving its full character count, and never blocks the write.
+- Text to send must be shown in full to be approved, so text too long to fit once wrapped returns `APPROVAL_TEXT_TOO_LONG` instead of a dialog.
+  The text itself has room for about 19 rows, or about 950 characters of plain text, because the rest of the dialog is held for its other lines and any context.
+  The rows of a split URL count toward that limit.
+- A `zenity` that cannot open its display exits with the same code as Cancel, so x-axi reads its error output and returns `APPROVAL_UNAVAILABLE` rather than reporting a cancel nobody made.
+- The gate is weaker than on macOS.
+  Any process running as you can click in an X11 dialog, or set `DISPLAY` to an X server it controls and click there.
+
+CI runs the suite on Ubuntu and macOS on Node 20 and 24.
+It tests the Linux dialogs with fake executables that record their arguments and exit with a chosen code, so no real click reaches `zenity` or `kdialog` in CI.
+The flags were checked against the help output of `zenity` 4.0.1 and `kdialog` 23.08 and against their upstream source on 2026-11-01.
+Neither real Linux dialog has been opened by the test suite, so how they look on your desktop is unverified.
+CI installs the standalone pnpm build described under [Install](#install).
+
 ## Cost
 
 Each priced result shows `est_cost`, and `x-axi spend` totals them locally.
@@ -153,7 +187,7 @@ The console is the billing truth, and its spend limit is the only hard cap.
 ```sh
 pnpm run build && pnpm test
 X_AXI_TEST_KEYCHAIN=1 pnpm test   # macOS: also round-trips a record through a temporary keychain under a temp directory, never the login keychain
-X_AXI_TEST_DIALOG=1 pnpm test     # also opens a real dialog for one second and lets it expire
+X_AXI_TEST_DIALOG=1 pnpm test     # macOS: also opens a real dialog for one second and lets it expire
 ```
 
 The suite runs the login flow against a local fake of X's OAuth endpoints with an injected in-memory keystore, checks PKCE against the RFC 7636 appendix B vector, and asserts that the real backends' commands carry the secret on stdin and never on argv.

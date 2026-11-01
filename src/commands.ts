@@ -24,6 +24,7 @@ const FOLLOW_BATCH_DEFAULT = 100;
 export type Output = Record<string, unknown>;
 
 const PREVIEW = 280;
+const MAX_SHOWN_PATH = 120;
 const POST_FIELDS = "tweet.fields=created_at,public_metrics,conversation_id,note_tweet,entities&expansions=author_id&user.fields=username";
 
 // ---- reading -----------------------------------------------------------------
@@ -74,6 +75,14 @@ function usernames(body: Json): Map<string, string> {
 function fullText(post: Json): string {
   const note = post["note_tweet"] as { text?: string } | undefined;
   return note?.text ?? String(post["text"] ?? "");
+}
+
+/** Keeps both ends of a path, because the name of the file and where it sits are what identify it. */
+function shortenPath(path: string): string {
+  const characters = Array.from(path);
+  if (characters.length <= MAX_SHOWN_PATH) return path;
+  const end = MAX_SHOWN_PATH / 2;
+  return `${characters.slice(0, end).join("")} ...[${characters.length} characters in full]... ${characters.slice(-end).join("")}`;
 }
 
 function truncate(text: string, full: boolean): string {
@@ -301,13 +310,33 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       ...(context ? { context } : {}),
     });
     if (result === "approved") return;
-    const reasons: Record<Exclude<ApprovalResult, "approved">, [string, string]> = {
+    const reasons: Record<Exclude<ApprovalResult, "approved">, [string, string, string?]> = {
       cancelled: ["the user cancelled this action; nothing was sent", "NOT_APPROVED"],
       timed_out: ["nobody answered the approval dialog; nothing was sent", "NOT_APPROVED"],
       unavailable: ["no approval dialog is available on this machine; nothing was sent", "APPROVAL_UNAVAILABLE"],
+      no_graphical_session: [
+        "writes need a dialog on a graphical desktop, and this session has neither DISPLAY nor WAYLAND_DISPLAY; nothing was sent",
+        "APPROVAL_UNAVAILABLE",
+        "Run x-axi from a desktop session with zenity or kdialog installed; there is no terminal prompt or override",
+      ],
+      no_dialog_tool: [
+        "writes need zenity or kdialog, and neither is in /usr/bin, /bin, or /usr/local/bin; nothing was sent",
+        "APPROVAL_UNAVAILABLE",
+        "Ask the user to install zenity (or kdialog) from their distribution; there is no terminal prompt or override",
+      ],
+      unsupported_platform: [
+        `writes need a native approval dialog, which x-axi has only on macOS and Linux, not on ${process.platform}; nothing was sent`,
+        "APPROVAL_UNSUPPORTED_PLATFORM",
+        "Run writes on macOS or Linux; there is no terminal prompt or override",
+      ],
+      too_long: [
+        "this text is too long for the Linux approval dialog, which must show all of it and has room for about 19 rows of 50 columns of text once wrapped, or about 950 characters of plain text; nothing was sent",
+        "APPROVAL_TEXT_TOO_LONG",
+        "Shorten the text; parent posts and other context never cause this, and a URL wider than one row is split only for display and sent unchanged",
+      ],
     };
-    const [message, code] = reasons[result];
-    throw new AxiError(message, code, ["Do not retry unless the user asks; never call the X API another way to get around this"]);
+    const [message, code, advice] = reasons[result];
+    throw new AxiError(message, code, [...(advice ? [advice] : []), "Do not retry unless the user asks; never call the X API another way to get around this"]);
   };
 
   /** Writes are never retried: after a lost response, a retry could publish twice. */
@@ -497,7 +526,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const parent = await fetchPost(id);
       if (!parent) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
       const usd = estimatePostCost(text, String(parent.post["author_id"]) !== account.id);
-      return createPost(text, id, account, usd, `Replying to @${parent.author}: ${displayText(truncate(fullText(parent.post), false))}`);
+      return createPost(text, id, account, usd, `Replying to @${parent.author}: ${displayText(fullText(parent.post))}`);
     },
     delete: async (args) => {
       const parsed = parseArgs(args, "delete", []);
@@ -559,7 +588,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const usd = batch.length * RATES.userInteraction;
       const names = batch.slice(0, 10).map((u) => `@${u.username}`).join(", ");
       const more = batch.length > 10 ? `, and ${batch.length - 10} more` : "";
-      const provenance = `Usernames come from ${displayText(file)} and were not verified with X.`;
+      const provenance = `Usernames come from ${shortenPath(displayText(file))} and were not verified with X.`;
       await gate(`Follow ${counted(batch.length, "account")} over about ${counted(Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000), "minute")}`, account, { content: `${names}${more}\n\n${provenance}` }, usd);
       const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
       let followed = 0;
