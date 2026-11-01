@@ -73,6 +73,7 @@ Without a handle they read your own list.
 `--all --out file.json` exports every page to a JSON array of `{id, username, name, protected}`.
 The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `follow-plan`, not from an export.
 A read estimated above $1 refuses before reading any page, and names the total and the cost, unless `--max-spend <usd>` covers it.
+`--all` with `--next` cannot be priced in advance, so it does not refuse up front; it stops at the cap, keeps what it read, and prints the command to continue.
 Every read sizes its page to what the cap still allows, so a wrong total from X cannot spend past it, and a page cut short this way still gives a `next_token`.
 If the cap, a rate limit, or an error stops an export after its first page, the file holds what was paid for and the output gives the `next_token` to continue into a new file.
 The export reports `complete: true` only if the read did not stop and X reported no partial errors.
@@ -114,7 +115,7 @@ Do not rerun a stopped thread, because the posted parts are public.
 
 A file's extension must agree with its bytes.
 MP4 means a plain MP4 brand and WebM means the WebM DocType, so HEIC, AVIF, M4A, 3GP, and other Matroska files are refused.
-These checks run before any API call, and the dialog shows the file's full path, type, and size.
+These checks run before any API call, and the dialog shows the file's path, type, and size, eliding the middle of a path over 120 characters.
 The upload runs only after approval, through `POST /2/media/upload/initialize`, then `POST /2/media/upload/{id}/append` in multipart chunks of at most 5,000,000 bytes indexed from 0, then `POST /2/media/upload/{id}/finalize`, then `GET /2/media/upload` while X reports processing, for at most 10 minutes.
 A failed chunk stops the upload and is not retried, and the error says nothing was posted.
 A file that changes after approval is refused.

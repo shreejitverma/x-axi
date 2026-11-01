@@ -70,6 +70,33 @@ describe("selectBackend", () => {
 const rowsOf = (shown: string) => shown.split("\n").length;
 
 describe("linuxApprovalText", () => {
+  describe("with a media path too wide for a row", () => {
+    const path = `/home/me/${"d".repeat(70)}/photo.png`;
+    const action = `Post with media ${path} (image/png, 1.0 MB), upload price not listed by X,`;
+    const wordsFit = (shown: string): void => {
+      // kdialog elides a word wider than the screen while still offering Approve.
+      for (const word of shown.split(/\s+/)) expect(Array.from(word).length).toBeLessThanOrEqual(50);
+    };
+    const unmarked = (shown: string): string => shown.replaceAll("\u21b5\n", "");
+
+    it.each<[string, ApprovalRequest]>([
+      ["text", { action, account: "me", estCostUsd: 0.015, text: "hi" }],
+      ["content", { action, account: "me", estCostUsd: 0.015, content: "No text; only the media named above is posted." }],
+      ["context", { action, account: "me", estCostUsd: 0.015, text: "hi", context: "Replying to @alice: hello" }],
+    ])("splits it with a note and loses none of it, with %s", (_name, request) => {
+      const shown = linuxApprovalText(request)!;
+      wordsFit(shown);
+      expect(unmarked(shown)).toContain(path);
+      expect(shown).toContain("(\u21b5), which are not sent.");
+    });
+
+    it("counts marks in the path and in the text together", () => {
+      const shown = linuxApprovalText({ action, account: "me", estCostUsd: 0.015, text: "a".repeat(60) })!;
+      wordsFit(shown);
+      expect(shown).toContain("splits long words at 2 marks");
+    });
+  });
+
   it.each([
     ["a 280 character post", "word ".repeat(56), true],
     ["950 ordinary characters, the room the refusal states", "word ".repeat(190), true],

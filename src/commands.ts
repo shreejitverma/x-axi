@@ -163,7 +163,7 @@ export const HELP: Record<string, string> = {
   search: "usage: x-axi search <query> [--limit 10-100] [--next TOKEN] [--full]\nRecent search, last 7 days. Each result costs about $0.005.",
   user: "usage: x-axi user <handle>",
   dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text> [--dry-run]   (needs your approval)\nEncrypted XChat conversations are not covered.",
-  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and if X's total proves too low, a page is cut short at the cap and --all stops there. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
+  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and if X's total proves too low, a page is cut short at the cap and --all stops there. --all with --next cannot be priced in advance, so it always stops at the cap and prints how to continue. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
   followers: "usage: x-axi followers [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi followers [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts following a user; yours without a handle. Costs, caps, and the unfiltered --all export as for `following`.",
   "follow-plan": "usage: x-axi follow-plan <handle> --out queue.json [--max-spend USD] [--include-protected]\nReads that account's following and your own following once, removes accounts you already follow and yourself, and writes a queue for follow-file. Protected accounts go to <out>.protected.json instead of the queue unless you pass --include-protected. Writes nothing to X. About $0.01 per account listed, $0.001 on your own list when you own the app, and $0.02 for the two lookups that give the totals. An estimate above $1 refuses without a --max-spend that covers it. Never overwrites a file, and writes no queue from an incomplete read.",
   post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
@@ -629,12 +629,15 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const rerun = `x-axi ${side}${handle ? ` ${handle}` : ""}`;
     const keepCap = maxSpend === undefined ? "" : ` --max-spend ${maxSpend}`;
     const total = target.total ?? "unknown";
-    const count = all ? target.total : Math.min(limit, target.total ?? limit);
-    const estimate = count === undefined ? undefined : recorded + count * target.rate;
-    if (estimate === undefined && maxSpend === undefined) {
-      throw new AxiError("X did not return the size of this list, so its cost cannot be estimated; nothing more was read", "SPEND_CAP", ["Pass --max-spend USD to read it up to that amount"]);
+    const resuming = all && next !== undefined;
+    if (!resuming) {
+      const count = all ? target.total : Math.min(limit, target.total ?? limit);
+      const estimate = count === undefined ? undefined : recorded + count * target.rate;
+      if (estimate === undefined && maxSpend === undefined) {
+        throw new AxiError("X did not return the size of this list, so its cost cannot be estimated; nothing more was read", "SPEND_CAP", ["Pass --max-spend USD to read it up to that amount"]);
+      }
+      if (estimate !== undefined && overCap(estimate, cap)) throw spendCapError(`Reading ${count} of the ${total} ${side} of ${name}`, estimate, cap);
     }
-    if (estimate !== undefined && overCap(estimate, cap)) throw spendCapError(`Reading ${count} of the ${total} ${side} of ${name}`, estimate, cap);
     if (out === undefined) {
       const room = rowsWithinCap(target, cap);
       if (room < 1) throw spendCapError(`Reading a page of the ${total} ${side} of ${name}`, recorded + target.rate, cap);
@@ -646,7 +649,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         ...(page.partial ? { partial_errors: `${page.partial}: ${errorDetail(page.body)}` } : {}),
         ...(page.next ? { next_token: page.next } : {}),
         est_cost: money(recorded),
-        ...(page.next ? { help: [`Run \`${rerun} --limit ${limit} --next ${page.next}${keepCap}\` for more, or \`${rerun} --all --out FILE --next ${page.next}${keepCap}\` to export the rest`] } : {}),
+        ...(page.next ? { help: [`Run \`${rerun} --limit ${limit} --next ${page.next}${keepCap}\` for more, or \`${rerun} --all --out FILE --next ${page.next}${keepCap}\` to export the rest, which stops at the ${money(cap)} cap`] } : {}),
       };
     }
     const file = String(out);
@@ -664,6 +667,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       ...(result.next ? { next_token: result.next } : {}),
       est_cost: money(recorded),
       help: [
+        ...(resuming ? [`What remains after --next cannot be priced in advance, so this read was held to the ${money(cap)} cap instead of being refused up front`] : []),
         ...(result.stopped ? [...result.stopped.suggestions, result.next ? `The file holds what was read. Continue into a new file with \`${rerun} --all --out NEW_FILE --next ${result.next}${keepCap}\`` : "The file holds what was read"] : []),
         "This export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan <handle> --out queue.json`",
       ],

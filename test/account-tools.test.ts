@@ -688,6 +688,39 @@ describe("following and followers", () => {
     expect((JSON.parse(readFileSync(out, "utf8")) as Json[])[0]).toMatchObject({ id: "1005" });
   });
 
+  // $1 default cap less the $0.01 lookup leaves $0.99, which buys 99 rows at the published $0.01.
+  it("exports the rest of a list too large for the cap in stages, each stopping at the cap with a working continuation", async () => {
+    const accounts = { "2": bob(manyUsers(5000)) };
+    const first = await harness(lists(accounts)).commands["following"]!(["bob"]);
+    const [, rest] = printedCommands(first);
+    expect((first["help"] as string[]).join(" ")).toContain("stops at the $1.000 cap");
+    const out = join(dir, "rest.json");
+    const stage = await runPrinted(rest!.replace("FILE", out), accounts);
+    expect(stage).toMatchObject({ export: { written: 99, complete: false }, stopped: { code: "SPEND_CAP" }, next_token: "token119", est_cost: "$1.000" });
+    expect((stage["help"] as string[]).join(" ")).toContain("cannot be priced in advance");
+    expect((JSON.parse(readFileSync(out, "utf8")) as Json[])[0]).toMatchObject({ id: "1020" });
+    const continuation = printedCommands(stage).find((c) => c.includes("--next"));
+    const nextOut = join(dir, "more.json");
+    await expect(runPrinted(continuation!.replace("NEW_FILE", nextOut), accounts)).resolves.toMatchObject({ export: { written: 99 }, next_token: "token218" });
+    expect((JSON.parse(readFileSync(nextOut, "utf8")) as Json[])[0]).toMatchObject({ id: "1119" });
+  });
+
+  it("--all --next near the end of a large list costs only what remains", async () => {
+    const out = join(dir, "tail.json");
+    const h = harness(lists({ "2": bob(manyUsers(130)) }));
+    // 10 rows left at $0.01 plus the $0.01 lookup; the whole list would be priced at $1.31.
+    const result = await h.commands["following"]!(["bob", "--all", "--out", out, "--next", "token120"]);
+    expect(result).toMatchObject({ export: { written: 10, complete: true }, est_cost: "$0.110" });
+  });
+
+  it("--all without --next still refuses a list over the cap up front", async () => {
+    const out = join(dir, "whole.json");
+    const h = harness(lists({ "2": bob(manyUsers(130)) }));
+    await expect(h.commands["following"]!(["bob", "--all", "--out", out])).rejects.toMatchObject({ code: "SPEND_CAP" });
+    expect(h.reads().filter((c) => c.path.includes("/following"))).toEqual([]);
+    expect(existsSync(out)).toBe(false);
+  });
+
   it("omits --max-spend from a continuation when the read did not need one", async () => {
     const first = await harness(lists({ "2": bob(manyUsers(30)) })).commands["following"]!(["bob", "--limit", "5"]);
     expect(printedCommands(first)[0]).toBe("x-axi following bob --limit 5 --next token5");
