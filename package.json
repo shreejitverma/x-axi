@@ -1,0 +1,24 @@
+{
+  "name": "x-axi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AXI-compliant CLI for X: read data and manage your account, with a human approval gate on every write",
+  "type": "module",
+  "packageManager": "pnpm@11.9.0",
+  "bin": { "x-axi": "./dist/bin/x-axi.js" },
+  "scripts": {
+    "build": "tsc",
+    "test": "vitest run"
+  },
+  "license": "MIT",
+  "engines": { "node": ">=20" },
+  "dependencies": {
+    "@toon-format/toon": "^2.1.0",
+    "axi-sdk-js": "^0.1.10"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  }
+}
