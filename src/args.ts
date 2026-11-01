@@ -66,6 +66,10 @@ export function parseHandle(value: string | undefined): string {
 // This covers format, control, separator, private-use, and unassigned code points
 // (tag characters included), plus blank fillers and hidden variation selectors.
 const DECEPTIVE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}͏ᅟᅠ឴឵᠋-᠍⠀ㅤ︀-︎ﾠ\u{e0100}-\u{e01ef}]/u;
+// A zero-width joiner is ordinary text in exactly two places: between two emoji
+// (after any U+FE0F or skin tone), and after a virama, listed by script because
+// JavaScript has no property for it. DECEPTIVE still refuses it everywhere else.
+const TEXT_JOINER = /(?<=\p{Extended_Pictographic}[\u{fe0f}\u{1f3fb}-\u{1f3ff}]?)‍(?=\p{Extended_Pictographic})|(?<=[्্੍્୍்్್്්])‍/gu;
 const MAX_APPROVABLE = 4000;
 const MAX_APPROVABLE_LINES = 40;
 // Three blank lines in a row, or a long run of spaces, could push text out of view in the dialog.
@@ -74,7 +78,7 @@ const HIDING_GAP = /(?:[^\S\n]*\n){4}|[^\S\n]{40}/;
 /** Length is left to X because the limit depends on the account. */
 export function parseOutgoingText(value: string | undefined): string {
   if (!value?.trim()) throw usage("the text must not be empty");
-  if (DECEPTIVE.test(value.replaceAll("\n", ""))) throw usage("the text contains invisible or control characters; remove them");
+  if (DECEPTIVE.test(value.replace(TEXT_JOINER, "").replaceAll("\n", ""))) throw usage("the text contains invisible or control characters; remove them");
   if (value.length > MAX_APPROVABLE || value.split("\n").length > MAX_APPROVABLE_LINES) {
     throw usage(`the text is over ${MAX_APPROVABLE} characters or ${MAX_APPROVABLE_LINES} lines, too long to review in the approval dialog`);
   }
@@ -84,7 +88,11 @@ export function parseOutgoingText(value: string | undefined): string {
 
 /** Makes text from X safe to show in the approval dialog: one line, nothing invisible. */
 export function displayText(value: string): string {
-  return Array.from(value.replace(/\s+/gu, " "), (ch) => (DECEPTIVE.test(ch) ? "\ufffd" : ch)).join("");
+  return value
+    .replace(/\s+/gu, " ")
+    .split(TEXT_JOINER)
+    .map((part) => Array.from(part, (ch) => (DECEPTIVE.test(ch) ? "\ufffd" : ch)).join(""))
+    .join("\u200d");
 }
 
 export function onePositional(parsed: Parsed, command: string): string | undefined {

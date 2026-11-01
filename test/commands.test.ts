@@ -241,6 +241,119 @@ describe("review regressions", () => {
     expect(h.approve).not.toHaveBeenCalled();
   });
 
+  const joined = [
+    ["woman technologist", "\u{1f469}‍\u{1f4bb}"],
+    ["woman technologist with a skin tone", "\u{1f469}\u{1f3fd}‍\u{1f4bb}"],
+    ["rainbow flag", "\u{1f3f3}️‍\u{1f308}"],
+    ["woman health worker", "\u{1f469}‍⚕️"],
+    ["family", "\u{1f468}‍\u{1f469}‍\u{1f467}"],
+    ["a Devanagari conjunct", "क्‍ष"],
+    ["a Sinhala conjunct", "ශ්‍රී"],
+  ];
+
+  it.each(joined)("posts and shows %s unchanged", async (_name, text) => {
+    const h = harness(() => ok({ data: { id: "2" } }, 201));
+    await h.commands["post"]!([`hi ${text}`]);
+    expect(h.writes()[0]!.body).toEqual({ text: `hi ${text}` });
+    expect(formatApproval(h.requests[0]!)).toContain(text);
+  });
+
+  it.each(joined)("shows %s from X unchanged in the dialog", async (_name, text) => {
+    const parent = ok({ data: { id: "50", text, author_id: "9" }, includes: { users: [{ id: "9", username: "alice" }] } });
+    const h = harness((c) => (c.method === "GET" ? parent : ok({ data: { deleted: true } })));
+    await h.commands["delete"]!(["50"]);
+    expect(formatApproval(h.requests[0]!)).toContain(text);
+  });
+
+  const strayJoiners = [
+    ["between letters", "a‍b"],
+    ["at the start", "‍\u{1f4bb}"],
+    ["at the end of an emoji", "\u{1f469}‍"],
+    ["from an emoji to a letter", "\u{1f469}‍b"],
+    ["from a letter to an emoji", "a‍\u{1f4bb}"],
+    ["doubled between emoji", "\u{1f469}‍‍\u{1f4bb}"],
+    ["doubled after a virama", "क्‍‍ष"],
+    ["across a line break", "\u{1f469}\n‍\u{1f4bb}"],
+    ["after a consonant with no virama", "क‍ष"],
+    ["with a selector after a letter", "a️‍\u{1f4bb}"],
+  ];
+
+  it.each(strayJoiners)("refuses a joiner %s", async (_name, text) => {
+    const h = harness(() => PARENT);
+    await expect(h.commands["post"]!([text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["dm"]!(["send", "alice", text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it("marks a stray joiner from X in the dialog, next to a kept one", async () => {
+    const parent = ok({ data: { id: "50", text: "a‍b \u{1f469}‍\u{1f4bb}", author_id: "9" }, includes: { users: [{ id: "9", username: "alice" }] } });
+    const h = harness((c) => (c.method === "GET" ? parent : ok({ data: { deleted: true } })));
+    await h.commands["delete"]!(["50"]);
+    expect(formatApproval(h.requests[0]!)).toContain("a�b \u{1f469}‍\u{1f4bb}");
+  });
+
+  describe("when the network is down", () => {
+    const down = () => {
+      const approve = vi.fn(async (): Promise<ApprovalResult> => "approved");
+      const request = vi.fn(async () => { throw new Error("network failure: ENOTFOUND"); });
+      return { approve, request, commands: buildCommands({ client: { request }, approve }) };
+    };
+
+    it.each([
+      ["me", []],
+      ["timeline", []],
+      ["search", ["foo"]],
+      ["view", ["50"]],
+      ["user", ["alice"]],
+      ["dm", ["list"]],
+      ["dm", ["read", "alice"]],
+      ["api", ["/2/x"]],
+      ["post", ["hello"]],
+      ["reply", ["50", "hi"]],
+      ["delete", ["50"]],
+      ["follow", ["alice"]],
+    ])("%s %j reports X_UNAVAILABLE before any write or dialog", async (command, args) => {
+      const d = down();
+      await expect(d.commands[command]!(args)).rejects.toMatchObject({ code: "X_UNAVAILABLE", message: "network failure: ENOTFOUND" });
+      expect(d.approve).not.toHaveBeenCalled();
+      expect(d.request.mock.calls.every((call) => (call as unknown[])[0] === "GET")).toBe(true);
+    });
+
+    it("reports X_UNAVAILABLE for an owned read with a cached account", async () => {
+      writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "1", username: "shreejit" }));
+      await expect(down().commands["mentions"]!([])).rejects.toMatchObject({ code: "X_UNAVAILABLE" });
+    });
+  });
+
+  describe("read est_cost", () => {
+    const recorded = async (h: ReturnType<typeof harness>) =>
+      ((await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } }).spend.last_30d_usd;
+    const ALICE_USER = ok({ data: { id: "9", username: "alice" } });
+
+    it("includes the user lookup on dm read, with no messages", async () => {
+      const h = harness((c) => (c.path.startsWith("/2/users/by/username/") ? ALICE_USER : ok({ meta: { result_count: 0 } })));
+      await expect(h.commands["dm"]!(["read", "alice"])).resolves.toMatchObject({ est_cost: "$0.010" });
+      expect(await recorded(h)).toBe("0.010");
+    });
+
+    it("includes the account lookup on the first timeline, and not on the next", async () => {
+      const h = harness(() => ok({ data: [{ id: "5", text: "hi", author_id: "1" }] }));
+      await expect(h.commands["timeline"]!([])).resolves.toMatchObject({ est_cost: "$0.002" });
+      await expect(h.commands["timeline"]!([])).resolves.toMatchObject({ est_cost: "$0.001" });
+      expect(await recorded(h)).toBe("0.003");
+    });
+
+    it("shows the refresh cost on me", async () => {
+      const h = harness(() => PARENT);
+      await expect(h.commands["me"]!([])).resolves.toMatchObject({ est_cost: "$0.001" });
+    });
+
+    it("keeps a write's estimate to the write itself", async () => {
+      const h = harness(() => ok({ data: { id: "2" } }, 201));
+      await expect(h.commands["post"]!(["hello"])).resolves.toMatchObject({ est_cost: "$0.015" });
+    });
+  });
+
   it("keeps multi-line and non-Latin posts", async () => {
     const h = harness(() => ok({ data: { id: "2" } }, 201));
     await h.commands["post"]!(["line one\nनमस्ते"]);

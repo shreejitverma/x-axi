@@ -24,8 +24,18 @@ const POST_FIELDS = "tweet.fields=created_at,public_metrics,conversation_id,note
 
 // ---- reading -----------------------------------------------------------------
 
+/** Unlike a write, a failed read changed nothing, so its outcome is known. */
+async function read(deps: Deps, path: string): Promise<ApiResponse> {
+  try {
+    return await deps.client.request("GET", path);
+  } catch (error) {
+    if (error instanceof AxiError) throw error;
+    throw new AxiError((error as Error).message, "X_UNAVAILABLE");
+  }
+}
+
 async function get(deps: Deps, path: string): Promise<ApiResponse> {
-  const response = await deps.client.request("GET", path);
+  const response = await read(deps, path);
   if (response.status >= 300) throw toApiError(response);
   return response;
 }
@@ -156,15 +166,18 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
 
   // Local bookkeeping problems surface here, because they must never hide or fail a write that X confirmed.
   const warnings = new Set<string>();
+  // What the running command has added to the ledger, so a read's est_cost matches it, lookups included.
+  let recorded = 0;
 
   const spend = (op: string, usd: number | null): void => {
+    recorded += usd ?? 0;
     const warning = recordSpend(op, usd);
     if (warning) warnings.add(warning);
   };
 
   const charge = (op: string, usd: number): Output => {
     spend(op, usd);
-    return { est_cost: money(usd) };
+    return { est_cost: money(recorded) };
   };
 
   const persistFollowLog = (update: () => void): void => {
@@ -219,8 +232,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     };
   };
 
-  const fetchPost = async (id: string): Promise<{ post: Json; author: string; usd: number } | undefined> => {
-    const response = await deps.client.request("GET", `/2/tweets/${id}?${POST_FIELDS}`);
+  const fetchPost = async (id: string): Promise<{ post: Json; author: string } | undefined> => {
+    const response = await read(deps, `/2/tweets/${id}?${POST_FIELDS}`);
     if (response.status === 404) return undefined;
     if (response.status >= 300) throw toApiError(response);
     const post = response.body["data"] as Json | undefined;
@@ -230,10 +243,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       if (Array.isArray(errors) && /not.?found/i.test(JSON.stringify(errors))) return undefined;
       throw new AxiError(`X could not return post ${id}: ${errorDetail(response.body)}`, "FORBIDDEN");
     }
-    const usd = RATES.postRead + includedUsers(response.body) * RATES.userRead;
-    spend("view", usd);
+    spend("view", RATES.postRead + includedUsers(response.body) * RATES.userRead);
     const author = usernames(response.body).get(String(post["author_id"])) ?? "?";
-    return { post, author, usd };
+    return { post, author };
   };
 
   const resolveUser = async (handle: string): Promise<Account> => {
@@ -350,7 +362,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     me: async (args) => {
       parseArgs(args, "me", []);
       const account = await refreshAccount();
-      return { account: { id: account.id, handle: `@${account.username}` }, help: ["Run `x-axi mentions` to see who mentioned you"] };
+      return { account: { id: account.id, handle: `@${account.username}` }, est_cost: money(recorded), help: ["Run `x-axi mentions` to see who mentioned you"] };
     },
     timeline: (args) => ownedList(args, "timeline", "tweets"),
     mentions: (args) => ownedList(args, "mentions", "mentions"),
@@ -381,7 +393,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
           reposts: metrics["retweet_count"] ?? 0,
           conversation: found.post["conversation_id"],
         },
-        est_cost: money(found.usd),
+        est_cost: money(recorded),
         help: [`Run \`x-axi replies ${id}\` for its comments`],
       };
     },
@@ -595,6 +607,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       name,
       async (args: string[]) => {
         warnings.clear();
+        recorded = 0;
         try {
           const output = await run(args);
           return warnings.size ? { ...output, warning: [...warnings].join("; ") } : output;

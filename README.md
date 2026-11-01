@@ -63,6 +63,7 @@ Checked against the [changelog](https://docs.x.com/changelog) and [pricing](http
 ## Cost
 
 Each result shows `est_cost`, and `x-axi spend` totals them locally.
+A write's `est_cost` is the write alone; the lookups before its dialog appear only in `spend`.
 These are upper bounds, because X does not re-bill a resource within a UTC day and may change its rates.
 A write with an unknown outcome is counted, because it may have been billed.
 The console is the billing truth, and its spend limit is the only hard cap.
