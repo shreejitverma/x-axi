@@ -11,6 +11,7 @@ cd ~/github/x-axi && pnpm install --frozen-lockfile && pnpm run build && npm lin
 ```
 
 Node 20 or newer.
+The install uses pnpm 11, which itself needs Node 22.13 or newer; on an older Node, install pnpm's standalone `@pnpm/exe` build, which brings its own Node.
 To update, run `git pull && pnpm install --frozen-lockfile && pnpm run build` in the checkout.
 `x-axi update` only prints this, because the `x-axi` name on npm does not belong to this project.
 
@@ -169,8 +170,7 @@ CI runs the suite on Ubuntu and macOS on Node 20 and 24.
 It tests the Linux dialogs with fake executables that record their arguments and exit with a chosen code, so no real click reaches `zenity` or `kdialog` in CI.
 The flags were checked against the help output of `zenity` 4.0.1 and `kdialog` 23.08 and against their upstream source on 2026-11-01.
 Neither real Linux dialog has been opened by the test suite, so how they look on your desktop is unverified.
-`X_AXI_TEST_DIALOG=1` opens a real dialog only on macOS.
-CI installs the standalone `@pnpm/exe` build, because pnpm 11 itself does not run on Node 20.
+CI installs the standalone pnpm build described under [Install](#install).
 
 ## Cost
 
@@ -187,7 +187,7 @@ The console is the billing truth, and its spend limit is the only hard cap.
 ```sh
 pnpm run build && pnpm test
 X_AXI_TEST_KEYCHAIN=1 pnpm test   # macOS: also round-trips a record through a temporary keychain under a temp directory, never the login keychain
-X_AXI_TEST_DIALOG=1 pnpm test     # also opens a real dialog for one second and lets it expire
+X_AXI_TEST_DIALOG=1 pnpm test     # macOS: also opens a real dialog for one second and lets it expire
 ```
 
 The suite runs the login flow against a local fake of X's OAuth endpoints with an injected in-memory keystore, checks PKCE against the RFC 7636 appendix B vector, and asserts that the real backends' commands carry the secret on stdin and never on argv.
