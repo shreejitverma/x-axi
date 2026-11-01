@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -608,6 +608,29 @@ describe("following and followers", () => {
     await expect(h.commands["following"]!(["bob", "--limit", "500", "--max-spend", "5.01"])).resolves.toMatchObject({ count: 500 });
   });
 
+  // Worked from the published rates: a $0.01 lookup plus $0.01 per row.
+  it.each([
+    [108, "1.09"],
+    [137, "1.38"],
+    [140, "1.41"],
+    [163, "1.64"],
+  ])("advises a cap for %i rows that the rerun accepts", async (rows, usd) => {
+    const accounts = { "2": bob(manyUsers(200)) };
+    const refused = harness(lists(accounts));
+    const error = await refused.commands["following"]!(["bob", "--limit", String(rows)]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe("SPEND_CAP");
+    expect(error.suggestions[0]).toContain(`--max-spend ${usd} `);
+    const rerun = harness(lists(accounts));
+    await expect(rerun.commands["following"]!(["bob", "--limit", String(rows), "--max-spend", usd])).resolves.toMatchObject({ count: rows, est_cost: `$${usd}0` });
+  });
+
+  it("creates an export readable only by its owner", async () => {
+    const out = join(dir, "export.json");
+    const h = harness(lists({ "2": bob(manyUsers(2)) }));
+    await h.commands["followers"]!(["bob", "--all", "--out", out]);
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+  });
+
   it("cuts a page short at the cap when X's count is too low", async () => {
     const h = harness(lists({ "2": { counts: { username: "bob", following_count: 10 }, following: manyUsers(5000) } }));
     // $0.01 lookup leaves $0.99, which buys 99 rows at the $0.01 list rate.
@@ -848,9 +871,37 @@ describe("following and followers", () => {
       expect(String(result["warning"])).toContain("1 of the 2");
     });
 
-    it("refuses your own account, an existing queue, and a missing --out", async () => {
+    it("advises a cap for both lists that the rerun accepts", async () => {
       const out = join(dir, "queue.json");
-      const h = harness(lists({ ...plan([], []), "2": { counts: { username: "shreejit", following_count: 0 } } }));
+      // $0.02 of lookups, 10 of your own at $0.001, 135 of theirs at $0.01.
+      const accounts = plan(manyUsers(10, 5000), manyUsers(135));
+      const refused = harness(lists(accounts));
+      const error = await refused.commands["follow-plan"]!(["bob", "--out", out]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+      expect(error.code).toBe("SPEND_CAP");
+      expect(error.suggestions[0]).toContain("--max-spend 1.38 ");
+      const rerun = harness(lists(accounts));
+      await expect(rerun.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "1.38"])).resolves.toMatchObject({ follow_plan: { queued: 135 }, est_cost: "$1.380" });
+    });
+
+    it("creates the queue and the protected list readable only by their owner", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan([], [user(12), user(13, { protected: true })])));
+      await h.commands["follow-plan"]!(["bob", "--out", out]);
+      expect(statSync(out).mode & 0o777).toBe(0o600);
+      expect(statSync(join(dir, "queue.protected.json")).mode & 0o777).toBe(0o600);
+    });
+
+    it("refuses your own account, reading neither list and writing no file", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists({ "1": { counts: { username: "shreejit", following_count: 1 }, following: [user(10)] } }));
+      await expect(h.commands["follow-plan"]!(["shreejit", "--out", out])).rejects.toMatchObject({ code: "VALIDATION_ERROR", message: expect.stringContaining("your own account") });
+      expect(h.reads().filter((c) => c.path.includes("/following"))).toEqual([]);
+      expect(existsSync(out)).toBe(false);
+    });
+
+    it("refuses an existing queue and a missing --out", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan([], [])));
       await expect(h.commands["follow-plan"]!(["bob"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
       writeFileSync(out, "precious");
       await expect(h.commands["follow-plan"]!(["bob", "--out", out])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });

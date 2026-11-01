@@ -20,6 +20,8 @@ export interface Deps {
 // X allows 50 follows per 15 minutes and 400 per day. These stay under both.
 const FOLLOW_INTERVAL_MS = 20_000;
 const FOLLOW_DAILY_CAP = 400;
+// Sums of per-row rates carry float error, so 0.01 + 137 * 0.01 prints as 1.38 but compares above it.
+const CAP_SLACK_USD = 1e-9;
 const FOLLOW_BATCH_DEFAULT = 100;
 
 // GET /2/users/{id}/following and /followers take max_results from 1 to 1000.
@@ -566,7 +568,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   };
 
   /** How many rows the cap still allows, so even a wrong total from X cannot spend past it. */
-  const rowsWithinCap = (target: ListTarget, cap: number): number => Math.floor((cap - recorded) / target.rate + 1e-9);
+  const rowsWithinCap = (target: ListTarget, cap: number): number => Math.floor((cap - recorded + CAP_SLACK_USD) / target.rate);
 
   /** A failure keeps what was already paid for. */
   const readAllUsers = async (target: ListTarget, side: ListSide, op: string, cap: number, start?: string): Promise<ReadAll> => {
@@ -590,8 +592,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
   };
 
+  const overCap = (usd: number, cap: number): boolean => usd > cap + CAP_SLACK_USD;
+
   const spendCapError = (what: string, estimate: number, cap: number): AxiError => {
-    const needed = (Math.ceil(estimate * 100) / 100).toFixed(2);
+    const needed = (Math.ceil((estimate - CAP_SLACK_USD) * 100) / 100).toFixed(2);
     return new AxiError(`${what} would cost about ${money(estimate)}, above the ${money(cap)} cap; nothing more was read`, "SPEND_CAP", [
       `Pass --max-spend ${needed} if that is acceptable`,
       `Finding that out cost ${money(recorded)} in lookups`,
@@ -605,14 +609,14 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   /** Fails before any paid page if the file cannot be created, so paid results always have somewhere to go. */
   const reserveFile = (path: string): void => {
     try {
-      writeFileSync(path, "", { flag: "wx" });
+      writeFileSync(path, "", { flag: "wx", mode: 0o600 });
     } catch (error) {
       throw usage(`cannot create ${path}: ${(error as Error).message}; choose a new file`);
     }
   };
 
   const writeJson = (path: string, value: unknown): void => {
-    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`);
+    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
   };
 
   const listUsers = async (args: string[], side: ListSide): Promise<Output> => {
@@ -637,7 +641,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     if (estimate === undefined && maxSpend === undefined) {
       throw new AxiError("X did not return the size of this list, so its cost cannot be estimated; nothing more was read", "SPEND_CAP", ["Pass --max-spend USD to read it up to that amount"]);
     }
-    if (estimate !== undefined && estimate > cap) throw spendCapError(`Reading ${count} of the ${total} ${side} of ${name}`, estimate, cap);
+    if (estimate !== undefined && overCap(estimate, cap)) throw spendCapError(`Reading ${count} of the ${total} ${side} of ${name}`, estimate, cap);
     if (out === undefined) {
       const room = rowsWithinCap(target, cap);
       if (room < 1) throw spendCapError(`Reading a page of the ${total} ${side} of ${name}`, recorded + target.rate, cap);
@@ -693,7 +697,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
     if (mine.total !== undefined && theirs.total !== undefined) {
       const estimate = recorded + mine.total * mine.rate + theirs.total * theirs.rate;
-      if (estimate > cap) throw spendCapError(`Reading the ${theirs.total} accounts @${theirs.username} follows and the ${mine.total} you follow`, estimate, cap);
+      if (overCap(estimate, cap)) throw spendCapError(`Reading the ${theirs.total} accounts @${theirs.username} follows and the ${mine.total} you follow`, estimate, cap);
     }
     reserveFile(out);
     const incomplete = (whose: string, result: ReadAll): AxiError => {

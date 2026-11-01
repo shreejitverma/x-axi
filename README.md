@@ -76,7 +76,7 @@ A read estimated above $1 refuses before reading any page, and names the total a
 Every read sizes its page to what the cap still allows, so a wrong total from X cannot spend past it, and a page cut short this way still gives a `next_token`.
 If the cap, a rate limit, or an error stops an export after its first page, the file holds what was paid for and the output gives the `next_token` to continue into a new file.
 The export reports `complete: true` only if the read did not stop and X reported no partial errors.
-`--out` never overwrites a file.
+`--out` never overwrites a file, and it creates exports and queues readable only by you, because they can hold lists X shows only to approved viewers.
 
 ### Building a follow queue
 
