@@ -211,7 +211,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const q = pagedQuery(limit, parsed.flags.get("--next"));
     const response = await get(deps, `/2/users/${account.id}/${endpoint}?${q}&${POST_FIELDS}`);
     const rows = postRows(response.body, name === "mentions" ? account : undefined, parsed.flags.has("--full"));
-    const usd = rows.length * RATES.ownedRead + includedUsers(response.body) * RATES.ownedRead;
+    const usd = rows.length * RATES.ownedRead + includedUsers(response.body) * RATES.userRead;
     return { account: `@${account.username}`, ...listOutput("posts", rows, response.body, `0 ${name} found`, charge(name, usd)) };
   };
 

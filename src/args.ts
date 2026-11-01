@@ -107,7 +107,7 @@ const MAX_APPROVABLE = 4000;
 const MAX_APPROVABLE_LINES = 40;
 // Three blank lines in a row, or a long run of spaces, could push text out of view in the dialog.
 const HIDING_GAP = /(?:[^\S\n]*\n){4}|[^\S\n]{40}/;
-const ACCEPTED_BLANK = /[\u200e\u200f\ufe0f]/g;
+const ACCEPTED_BLANK = /[\u200d-\u200f\p{M}]/gu;
 
 /** Length is left to X because the limit depends on the account. */
 export function parseOutgoingText(value: string | undefined): string {

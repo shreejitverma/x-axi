@@ -258,6 +258,8 @@ describe("review regressions", () => {
     ["Hebrew with a right-to-left mark", "שלום‏!"],
     ["Arabic with a left-to-right mark", "مرحبا ‎abc"],
     ["a reserved emoji code point", "\u{1f0f6}"],
+    ["accented Latin with a combining mark", "cafe\u0301"],
+    ["Devanagari vowel signs", "\u0915\u093f \u0915\u0941"],
   ];
 
   it.each(joined)("posts and shows %s unchanged", async (_name, text) => {
@@ -402,6 +404,21 @@ describe("review regressions", () => {
       expect(await recorded(h)).toBe("0.012");
     });
 
+    it("prices included authors of an owned read at the User: Read rate", async () => {
+      writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "1", username: "shreejit" }));
+      const h = harness(() =>
+        ok({
+          data: [
+            { id: "5", text: "hi", author_id: "9" },
+            { id: "6", text: "hey", author_id: "9" },
+          ],
+          includes: { users: [{ id: "9", username: "alice" }] },
+        }),
+      );
+      await expect(h.commands["mentions"]!([])).resolves.toMatchObject({ est_cost: "$0.012" }); // 2 posts at 0.001 + 1 user at 0.010
+      expect(await recorded(h)).toBe("0.012");
+    });
+
     it("shows the refresh cost on me", async () => {
       const h = harness(() => PARENT);
       await expect(h.commands["me"]!([])).resolves.toMatchObject({ est_cost: "$0.010" });
@@ -469,6 +486,11 @@ describe("review regressions", () => {
     ["lines blank but for a right-to-left mark", `\u05e9${"\n\u200f".repeat(30)}\nBuy`],
     ["spaces split by variation selectors", `shown${" \ufe0f".repeat(200)}hidden`],
     ["spaces split by direction marks", `\u05e9${" \u200e".repeat(200)}hidden`],
+    ["lines blank but for a combining mark", `a${"\n\u0301".repeat(30)}\nb`],
+    ["lines blank but for a virama and a joiner", `a${"\n\u094d\u200d".repeat(30)}\nb`],
+    ["spaces split by combining marks", `shown${" \u0301".repeat(200)}hidden`],
+    ["nothing but a combining mark", "\u0301"],
+    ["nothing but a virama and a joiner", "\u094d\u200d"],
     ["nothing but a variation selector", "\ufe0f"],
     ["nothing but direction marks", "\u200f\u200e"],
   ])("refuses outgoing text with %s in post and dm send", async (_name, text) => {
@@ -520,7 +542,8 @@ describe("review regressions", () => {
   it("keeps ordinary paragraph spacing", async () => {
     const h = harness(() => ok({ data: { id: "2" } }, 201));
     await h.commands["post"]!(["one\n\n\ntwo"]);
-    expect(h.writes()).toHaveLength(1);
+    await h.commands["post"]!(["cafe\u0301\n\n\n\u0915\u093f"]);
+    expect(h.writes()).toHaveLength(2);
   });
 
   it("names a check that fits the write when the outcome is unknown", async () => {
