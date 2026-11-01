@@ -18,10 +18,10 @@ export const X_OAUTH: OAuthEndpoints = {
 /**
  * Only what the commands call, checked against each endpoint's documented scopes:
  * reads and posting (tweet.read, tweet.write, users.read), hide and unhide (tweet.moderate.write),
- * follow and unfollow (follows.write), DMs (dm.read, dm.write), and a refresh token (offline.access).
+ * follow and unfollow (follows.write), reading following and follower lists to build queues (follows.read), DMs (dm.read, dm.write), and a refresh token (offline.access).
  * The `api` command can reach only endpoints these scopes cover.
  */
-export const SCOPES = ["tweet.read", "tweet.write", "tweet.moderate.write", "users.read", "follows.write", "dm.read", "dm.write", "offline.access"];
+export const SCOPES = ["tweet.read", "tweet.write", "tweet.moderate.write", "users.read", "follows.read", "follows.write", "dm.read", "dm.write", "offline.access"];
 
 export function base64url(bytes: Buffer): string {
   return bytes.toString("base64url");

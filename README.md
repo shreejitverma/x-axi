@@ -35,7 +35,7 @@ The client ID is not a secret.
 `X_AXI_CLIENT_ID` in the environment also works.
 The same file may hold `redirect_uri` if port 8711 is taken; it must stay a loopback `http://127.0.0.1` URL, and the value registered with X must match it exactly.
 
-x-axi requests only the scopes its commands use: `tweet.read tweet.write tweet.moderate.write users.read follows.write dm.read dm.write offline.access`.
+x-axi requests only the scopes its commands use: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write dm.read dm.write offline.access`.
 The raw `x-axi api` command can reach only endpoints those scopes cover.
 
 ### Upgrading from a version that used xurl
