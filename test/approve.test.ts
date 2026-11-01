@@ -66,6 +66,7 @@ describe("selectBackend", () => {
 });
 
 // The dialog budget is 25 rows of 50 cells, with 3 rows always held back for context.
+// This counts rows only for text with no soft wraps. Wrapped ASCII is bounded by characters instead: 25 rows hold at most 1250.
 const rowsOf = (shown: string) => shown.split("\n").length;
 
 describe("linuxApprovalText", () => {
@@ -132,14 +133,16 @@ describe("linuxApprovalText", () => {
     const shown = linuxApprovalText({ ...REQUEST, text: "hello", context })!;
     expect(shown).toContain("----- context from X, not sent -----\nword word");
     expect(shown.endsWith("\n[cut to fit: 5000 characters in full]")).toBe(true);
-    expect(rowsOf(shown)).toBeLessThanOrEqual(25);
+    expect(shown.length).toBeLessThanOrEqual(25 * 50);
+    expect(shown.length).toBeGreaterThan(20 * 45);
   });
 
   it("cuts a target it cannot fit, and never refuses it", () => {
     const shown = linuxApprovalText({ action: "Delete post", account: "me", content: "word ".repeat(1000), estCostUsd: 0.01 })!;
     expect(shown.startsWith("Delete post as @me (about $0.010)\n\nword word")).toBe(true);
     expect(shown.endsWith("\n[cut to fit: 5000 characters in full]")).toBe(true);
-    expect(rowsOf(shown)).toBeLessThanOrEqual(22);
+    expect(shown.length).toBeLessThanOrEqual(22 * 50);
+    expect(shown.length).toBeGreaterThan(20 * 45);
   });
 });
 
@@ -364,11 +367,31 @@ describe("Linux dialog against a fake executable", () => {
     ["zero falls back to the default", "0", "120"],
     ["a negative falls back to the default", "-1", "120"],
     ["infinity falls back to the default", "Infinity", "120"],
-    ["over an hour falls back to the default", "3601", "120"],
+    ["over an hour", "7200", "7200"],
+    ["more than a timer can hold is limited to what it can", "99999999999", "2147483"],
   ])("sets the zenity timeout: %s", async (_name, requested, seconds) => {
     plant(bin, "zenity", "exit 1");
     await ask(requested === undefined ? {} : { X_AXI_APPROVAL_TIMEOUT: requested });
     expect(recordedArgv()).toContain(`--timeout=${seconds}`);
+  });
+});
+
+describe("a timeout too long for a timer", () => {
+  it("still waits for the answer instead of firing at once", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "x-axi-dialog-"));
+    try {
+      writeFileSync(join(dir, "zenity"), "#!/bin/sh\nsleep 0.2\nexit 1\n");
+      chmodSync(join(dir, "zenity"), 0o755);
+      const approve = createApprover({
+        platform: "linux",
+        env: { ...GRAPHICAL, X_AXI_APPROVAL_TIMEOUT: "99999999999" },
+        isExecutable: isExecutableFile,
+        directories: [dir],
+      });
+      await expect(approve(REQUEST)).resolves.toBe("cancelled");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

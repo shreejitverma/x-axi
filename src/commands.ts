@@ -330,9 +330,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         "Run writes on macOS or Linux; there is no terminal prompt or override",
       ],
       too_long: [
-        "this text has too many lines for the Linux approval dialog, which must show all of it; nothing was sent",
+        "this text is too long for the Linux approval dialog, which must show all of it and holds about 25 rows of 50 columns once wrapped; nothing was sent",
         "APPROVAL_TEXT_TOO_LONG",
-        "Shorten the text; long URLs, parent posts, and other context never cause this",
+        "Shorten the text; parent posts and other context never cause this, and a URL wider than one row is split only for display and sent unchanged",
       ],
     };
     const [message, code, advice] = reasons[result];

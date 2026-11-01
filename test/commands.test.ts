@@ -761,10 +761,16 @@ describe.each(["zenity", "kdialog"])("Linux dialog limits with a fake %s", (tool
     expect(shown).toContain("not verified with X");
   });
 
-  it("refuses outgoing text that cannot fit, sends nothing, and opens no dialog", async () => {
+  it.each([
+    ["30 short lines", Array(30).fill("line").join("\n")],
+    ["one 1500 character line of words", "word ".repeat(300).trim()],
+    ["one 900 character URL", `https://example.com/${"a".repeat(880)}`],
+  ])("refuses %s, sends nothing, and opens no dialog", async (_name, text) => {
     const h = linux(() => ok({ data: { id: "60" } }, 201));
-    const error = await h.commands["post"]!([Array(30).fill("line").join("\n")]).catch((e: unknown) => e);
+    const error = await h.commands["post"]!([text]).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: "APPROVAL_TEXT_TOO_LONG" });
+    expect((error as Error).message).toContain("about 25 rows of 50 columns once wrapped");
+    expect((error as Error).message).not.toContain("lines");
     expect((error as { suggestions: string[] }).suggestions.join("\n")).toMatch(/Shorten the text/);
     expect(h.writes()).toEqual([]);
     expect(h.dialogOpened()).toBe(false);

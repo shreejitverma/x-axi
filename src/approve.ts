@@ -31,7 +31,8 @@ export type Machine = {
 };
 
 const DEFAULT_TIMEOUT_SECONDS = 120;
-const MAX_TIMEOUT_SECONDS = 3600;
+// setTimeout fires at once for a delay over 2^31 - 1 milliseconds.
+const MAX_TIMEOUT_SECONDS = 2_147_483;
 const DIALOG_TITLE = "x-axi: approve this action";
 // Room for a whole 280 character post after its "Replying to @handle: " prefix.
 const MAX_UNWRAPPED_CONTEXT = 320;
@@ -106,7 +107,7 @@ export function isExecutableFile(path: string): boolean {
 
 function approvalTimeoutSeconds(env: NodeJS.ProcessEnv): number {
   const requested = Number(env["X_AXI_APPROVAL_TIMEOUT"]);
-  return requested > 0 && requested <= MAX_TIMEOUT_SECONDS ? Math.ceil(requested) : DEFAULT_TIMEOUT_SECONDS;
+  return Number.isFinite(requested) && requested > 0 ? Math.min(Math.ceil(requested), MAX_TIMEOUT_SECONDS) : DEFAULT_TIMEOUT_SECONDS;
 }
 
 // GTK dialogs do not scroll on every zenity version, so an oversized one can push text and buttons off the screen.
