@@ -1,6 +1,6 @@
 import { encode } from "@toon-format/toon";
 import { AxiError, exitCodeForError, runAxiCli } from "axi-sdk-js";
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createHttpClient } from "./api.js";
 import { approveWithDialog } from "./approve.js";
 import { createAuth, type AuthService } from "./auth.js";
@@ -32,12 +32,21 @@ function formatError(error: unknown): { output: string; exitCode: number } {
   };
 }
 
+/** Reports only a failure to start. `xdg-open` may run the browser in the foreground, so nothing here waits for it or stops it. */
+export function launchDetached(file: string, args: string[]): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(file, args, { detached: true, stdio: "ignore" });
+    child.on("error", reject);
+    child.on("spawn", () => {
+      child.unref();
+      resolve();
+    });
+  });
+}
+
 /** macOS `open` at its absolute path; Linux has no fixed location for `xdg-open`. The URL holds no secret: the verifier never leaves the process. */
 function openBrowser(url: string): Promise<void> {
-  const [file, args] = process.platform === "darwin" ? ["/usr/bin/open", [url]] : ["xdg-open", [url]];
-  return new Promise((resolve, reject) => {
-    execFile(file, args, { timeout: 15_000 }, (error) => (error ? reject(new Error(error.message.split("\n")[0] ?? "failed")) : resolve()));
-  });
+  return launchDetached(process.platform === "darwin" ? "/usr/bin/open" : "xdg-open", [url]);
 }
 
 /** Under the loopback API override the keystore is never read, and the login commands are not available. */

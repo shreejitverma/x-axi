@@ -173,7 +173,7 @@ export function setupSteps(redirectUri: string): string[] {
     "Approve the request in the browser; the login is stored in your OS keystore, never in a file",
     "Verify with: x-axi auth status, then x-axi me",
     `Scopes requested: ${SCOPES.join(" ")}`,
-    "Upgrading from a version that used xurl: run `x-axi login` once, then delete ~/.xurl if nothing else uses xurl, because it holds a plain-text token and client secret",
+    `Upgrading from a version that used xurl: change the app's Type of App to 'Native App', set its Callback URI to ${redirectUri}, run x-axi login --client-id YOUR_CLIENT_ID, then delete ~/.xurl if nothing else uses xurl, because it holds a plain-text token and client secret`,
   ];
 }
 

@@ -1170,7 +1170,7 @@ describe("account commands", () => {
     expect(h.calls).toEqual([]);
   });
 
-  it("setup names the exact callback URL, the Native App type, and the keystore, and never xurl", async () => {
+  it("setup names the exact callback URL, the Native App type, the keystore, and a working xurl upgrade, with no xurl command", async () => {
     const h = harness(() => PARENT);
     const out = (await h.commands["setup"]!([])) as { callback_url: string; steps: string[]; storage: string; client_id: string };
     expect(out.callback_url).toBe("http://127.0.0.1:8711/callback");
@@ -1181,6 +1181,9 @@ describe("account commands", () => {
     expect(out.steps.join("\n")).toContain("x-axi login --client-id");
     expect(out.steps.join("\n")).toContain("tweet.moderate.write");
     expect(out.steps.join("\n").toLowerCase()).not.toContain("client secret:");
+    expect(out.steps.join("\n")).not.toContain("xurl auth");
+    const upgrade = out.steps.find((step) => step.startsWith("Upgrading"));
+    for (const part of ["Native App", "http://127.0.0.1:8711/callback", "x-axi login --client-id YOUR_CLIENT_ID", "delete ~/.xurl"]) expect(upgrade).toContain(part);
     expect(h.calls).toEqual([]);
   });
 

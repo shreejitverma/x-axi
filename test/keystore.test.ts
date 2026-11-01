@@ -8,6 +8,16 @@ import { keychainStore, runCommand, secretServiceStore, selectKeystore, type Com
 const SECRET = '{"access_token":"SECRET_ACCESS","refresh_token":"SECRET_REFRESH"}';
 const ENCODED = Buffer.from(SECRET).toString("base64");
 
+const ITEM_NOT_FOUND = "The specified item could not be found in the keychain.";
+
+/** How `security` reports a status: `security error` prints the text and exits 1, and the failing command exits with the status's low byte. */
+function keychainFailure(failure: string, message = ITEM_NOT_FOUND) {
+  return (spec: CommandSpec): Partial<CommandResult> =>
+    spec.args[0] === "error"
+      ? { code: 1, stdout: `Error: 0xFFFF9D2C ${spec.args[1] ?? ""} ${message}\n` }
+      : { code: 44, stderr: `security: SecKeychainSearchCopyNext: ${failure}` };
+}
+
 /** Records every command and answers with a scripted result. */
 function recorder(answer: (spec: CommandSpec) => Partial<CommandResult>) {
   const specs: CommandSpec[] = [];
@@ -48,9 +58,22 @@ describe("macOS Keychain command construction", () => {
   it("decodes what it stored and treats exit 44 as no record", async () => {
     const r = recorder((spec) => (spec.args[0] === "find-generic-password" ? { stdout: `${ENCODED}\n` } : {}));
     await expect(keychainStore(r.run).read()).resolves.toBe(SECRET);
-    const missing = recorder(() => ({ code: 44, stderr: "security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain." }));
+    const missing = recorder(keychainFailure(ITEM_NOT_FOUND));
     await expect(keychainStore(missing.run).read()).resolves.toBeUndefined();
     await expect(keychainStore(missing.run).delete()).resolves.toBeUndefined();
+    expect(missing.specs.find((spec) => spec.args[0] === "error")!.args).toEqual(["error", "-25300"]);
+  });
+
+  it("treats exit 44 as no record when the system language translates the message", async () => {
+    const german = "Das angegebene Objekt konnte nicht im Schlüsselbund gefunden werden.";
+    const missing = recorder(keychainFailure(german, german));
+    await expect(keychainStore(missing.run).read()).resolves.toBeUndefined();
+    await expect(keychainStore(missing.run).delete()).resolves.toBeUndefined();
+  });
+
+  it("does not take exit 44 for a missing record when `security error` gives no message", async () => {
+    const r = recorder((spec) => (spec.args[0] === "error" ? { code: 1, stdout: "" } : { code: 44, stderr: `security: SecKeychainSearchCopyNext: ${ITEM_NOT_FOUND}` }));
+    await expect(keychainStore(r.run).read()).rejects.toMatchObject({ code: "KEYSTORE_ERROR" });
   });
 
   it("maps a locked keychain in a headless session to its own code", async () => {
@@ -73,7 +96,7 @@ describe("macOS Keychain command construction", () => {
   });
 
   it("does not take an unrelated exit status with the same low byte for a missing record", async () => {
-    const r = recorder(() => ({ code: 44, stderr: "security: SecKeychainSearchCopyNext: some other failure." }));
+    const r = recorder(keychainFailure("some other failure."));
     await expect(keychainStore(r.run).read()).rejects.toMatchObject({ code: "KEYSTORE_ERROR" });
     await expect(keychainStore(r.run).delete()).rejects.toMatchObject({ code: "KEYSTORE_ERROR" });
   });
@@ -129,7 +152,7 @@ describe("keystore selection", () => {
   });
 
   it("uses the Keychain on macOS regardless of PATH", async () => {
-    const r = recorder(() => ({ code: 44, stderr: "The specified item could not be found in the keychain." }));
+    const r = recorder(keychainFailure(ITEM_NOT_FOUND));
     await selectKeystore({ platform: "darwin", run: r.run, which: () => "/evil/secret-tool" }).read();
     expect(r.specs[0]!.file).toBe("/usr/bin/security");
   });

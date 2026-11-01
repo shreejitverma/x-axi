@@ -57,6 +57,7 @@ const SECURITY = "/usr/bin/security";
 // keeps a record from ever being split.
 const MAX_SECURITY_LINE = 3000;
 const ERR_SEC_ITEM_NOT_FOUND = 44;
+const ERR_SEC_ITEM_NOT_FOUND_STATUS = "-25300";
 const ERR_SEC_INTERACTION_NOT_ALLOWED = 36;
 
 /** Base64 keeps the record to one shell-safe token with no quoting rules to get wrong. */
@@ -74,9 +75,15 @@ function decode(stored: string, backend: string): string {
   return Buffer.from(stored, "base64").toString("utf8");
 }
 
-/** `security` exits with the low byte of an OSStatus, so the text is checked too before a failure counts as "no record". */
-function keychainSaysNotFound(result: CommandResult): boolean {
-  return result.code === ERR_SEC_ITEM_NOT_FOUND && /could not be found/.test(result.stderr);
+/**
+ * `security` exits with the low byte of an OSStatus, so the text is checked too before a failure counts as "no record".
+ * That text follows the system language, so `security error` supplies it. It exits 1 even when it prints the message.
+ */
+async function keychainSaysNotFound(result: CommandResult, run: CommandRunner): Promise<boolean> {
+  if (result.code !== ERR_SEC_ITEM_NOT_FOUND) return false;
+  const explained = await run({ file: SECURITY, args: ["error", ERR_SEC_ITEM_NOT_FOUND_STATUS] });
+  const message = new RegExp(`^Error: \\S+ ${ERR_SEC_ITEM_NOT_FOUND_STATUS} (.+)$`).exec(explained.stdout.trim())?.[1];
+  return message !== undefined && result.stderr.includes(message);
 }
 
 /** Only the first line of stderr, with the secret removed in case a tool echoed its input. */
@@ -113,7 +120,7 @@ export function keychainStore(run: CommandRunner, keychain?: string): Keystore {
     backend,
     async read() {
       const result = await run({ file: SECURITY, args: ["find-generic-password", "-a", ACCOUNT, "-s", SERVICE, "-w", ...target] });
-      if (keychainSaysNotFound(result)) return undefined;
+      if (await keychainSaysNotFound(result, run)) return undefined;
       if (result.code !== 0) throw fail("read", result);
       return decode(result.stdout.trim(), backend);
     },
@@ -128,7 +135,7 @@ export function keychainStore(run: CommandRunner, keychain?: string): Keystore {
     },
     async delete() {
       const result = await run({ file: SECURITY, args: ["delete-generic-password", "-a", ACCOUNT, "-s", SERVICE, ...target] });
-      if (result.code !== 0 && !keychainSaysNotFound(result)) throw fail("deleted", result);
+      if (result.code !== 0 && !(await keychainSaysNotFound(result, run))) throw fail("deleted", result);
     },
   };
 }

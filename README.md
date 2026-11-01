@@ -43,7 +43,12 @@ The raw `x-axi api` command can reach only endpoints those scopes cover.
 
 Earlier versions called the `xurl` CLI, which keeps a token and a client secret in plain text at `~/.xurl/auth.yml`.
 x-axi no longer reads or writes that directory.
-Run `x-axi login` once, then delete `~/.xurl` if nothing else on the machine uses xurl.
+Those versions registered a Web App (confidential client) with the callback `http://localhost:8080/callback`, and x-axi cannot sign in through that app as it stands.
+
+1. In the app's User authentication settings change Type of App to "Native App", and set the Callback URI to the one `x-axi setup` prints.
+2. Copy the OAuth 2.0 Client ID from the Keys and tokens page, and run `x-axi login --client-id YOUR_CLIENT_ID` in your own terminal.
+3. Delete `~/.xurl` if nothing else on the machine uses xurl.
+
 The spend ledger, cached account, and follow log in `~/.local/state/x-axi` keep working unchanged.
 
 ## Commands
