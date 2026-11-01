@@ -2,13 +2,17 @@ import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
 import { counted, type ApprovalBody, type ApprovalResult, type Approver } from "./approve.js";
 import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseOutgoingText, parsePostId, usage } from "./args.js";
+import type { AuthService } from "./auth.js";
+import { configPath, DEFAULT_REDIRECT_URI, parseClientId, readConfig, writeConfig } from "./config.js";
 import { readFileSync } from "node:fs";
-import { assertFollowLogReadable, DAY_MS, logFollow, logFollowAttempt, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
+import { assertFollowLogReadable, clearAccount, DAY_MS, logFollow, logFollowAttempt, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
+import { SCOPES } from "./oauth.js";
 import { estimatePostCost, RATES } from "./rates.js";
 
 export interface Deps {
   client: XClient;
   approve: Approver;
+  auth: AuthService;
   sleep?: (ms: number) => Promise<void>;
 }
 
@@ -151,18 +155,27 @@ export const HELP: Record<string, string> = {
   "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. One follow every 20 seconds, at most 400 in 24 hours, default 100 per run. Stops at the first error. Rerun to continue. Skips only accounts this login followed through x-axi, so filter the file against your real following list when you build it. Usernames are shown as the file gives them.",
   spend: "usage: x-axi spend\nLocal upper-bound estimate of API spend. No API call.",
   api: "usage: x-axi api </2/path?query>\nRaw GET for read endpoints without a command. Spend is not estimated. Writes are not available here.",
-  setup: "usage: x-axi setup\nShows login state and steps. No API call.",
+  setup: "usage: x-axi setup\nShows login state, the keystore, and the exact X portal steps. No API call.",
+  login: "usage: x-axi login [--client-id ID]\nSigns in to X in your browser with OAuth 2.0 PKCE and stores the login in the OS keystore. Run it yourself in a terminal, never through an agent. The client ID comes from --client-id, X_AXI_CLIENT_ID, or the config file, and is saved to the config file. Then fetches your account, about $0.01.",
+  logout: "usage: x-axi logout\nRevokes the tokens at X and deletes the stored login. No approval dialog; deleting is reported even when revocation fails.",
+  auth: "usage: x-axi auth status\nShows the account, scopes, access token expiry, and where the login is stored. Never shows a token. No API call.",
   update: "usage: x-axi update\nShows how to update from your git checkout. It installs nothing.",
 };
 
-export const SETUP_STEPS = [
-  "At https://console.x.com create an app on Pay-per-use and Production, with OAuth 2.0, type Web App (confidential client), and permissions Read, write and Direct Messages",
-  "Register the callback http://localhost:8080/callback, add credits, and set a spend limit",
-  "Run these one line at a time in your own terminal, never through an agent, so the secret stays out of transcripts and shell history. Pasted together, the next line becomes the secret:",
-  "  read -rs 'XS?Client secret: '; xurl auth apps add x-axi --client-id YOUR_CLIENT_ID --client-secret \"$XS\"; unset XS",
-  "  xurl auth default x-axi && xurl auth oauth2 --app x-axi",
-  "Verify with: x-axi me",
-];
+/** Setup must take a public user from nothing to a working login, so these name the exact portal fields. */
+export function setupSteps(redirectUri: string): string[] {
+  return [
+    "At https://console.x.com create a project and an app on Pay-per-use and Production; add credits and set a spend limit",
+    "In the app's User authentication settings turn on OAuth 2.0 with App permissions 'Read and write and Direct message' and Type of App 'Native App' (a public client; x-axi never uses a client secret)",
+    `Set the Callback URI to exactly ${redirectUri} and any https website URL you own, then save`,
+    "On the app's Keys and tokens page copy the OAuth 2.0 Client ID; if the portal also shows a Client Secret, the type is not Native App",
+    "In your own terminal, never through an agent, run: x-axi login --client-id YOUR_CLIENT_ID",
+    "Approve the request in the browser; the login is stored in your OS keystore, never in a file",
+    "Verify with: x-axi auth status, then x-axi me",
+    `Scopes requested: ${SCOPES.join(" ")}`,
+    "Upgrading from a version that used xurl: run `x-axi login` once, then delete ~/.xurl if nothing else uses xurl, because it holds a plain-text token and client secret",
+  ];
+}
 
 export function homeOutput(): Output {
   const account = readAccount();
@@ -609,10 +622,88 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         "In your x-axi checkout, run `git pull && pnpm install --frozen-lockfile && pnpm run build`",
       ]);
     },
-    setup: (args) => {
+    setup: async (args) => {
       parseArgs(args, "setup", []);
+      const config = readConfig();
+      const redirectUri = config.redirect_uri ?? DEFAULT_REDIRECT_URI;
+      const status = await deps.auth.status();
       const account = readAccount();
-      return { account: account ? `@${account.username}` : "not connected", steps: SETUP_STEPS };
+      return {
+        account: account ? `@${account.username}` : "not connected",
+        login: status.logged_in ? "stored" : status.problem ? "unknown, the keystore could not be read" : "none",
+        storage: status.storage,
+        ...(status.problem ? { storage_problem: status.problem } : {}),
+        client_id: config.client_id ? `configured in ${configPath()}` : `not configured; pass --client-id to login, saved to ${configPath()}`,
+        callback_url: redirectUri,
+        steps: setupSteps(redirectUri),
+        ...(status.help ? { help: status.help } : {}),
+      };
+    },
+    login: async (args) => {
+      const parsed = parseArgs(args, "login", ["--client-id"]);
+      if (parsed.positional.length) throw usage("`login` takes only --client-id", [HELP["login"] as string]);
+      const config = readConfig();
+      const flag = parsed.flags.get("--client-id");
+      const env = process.env["X_AXI_CLIENT_ID"];
+      const clientId = flag !== undefined ? parseClientId(flag, "--client-id") : env ? parseClientId(env, "X_AXI_CLIENT_ID") : config.client_id;
+      if (!clientId) throw usage("no client ID: pass --client-id, set X_AXI_CLIENT_ID, or put client_id in the config file", [SETUP_HINT]);
+      const status = await deps.auth.login(clientId);
+      // From here the login is stored, so every later problem is reported as a warning or with that fact attached.
+      try {
+        clearAccount(); // The cache may name the previous login's account.
+      } catch (error) {
+        warnings.add(`cached account not cleared: ${String(error)}`);
+      }
+      if (config.client_id !== clientId) {
+        try {
+          writeConfig({ ...config, client_id: clientId });
+        } catch (error) {
+          warnings.add(`client ID not saved to ${configPath()}: ${String(error)}; the stored login carries it, so refreshes still work`);
+        }
+      }
+      let account: Account;
+      try {
+        account = await refreshAccount();
+      } catch (error) {
+        const known = error instanceof AxiError;
+        throw new AxiError(
+          `signed in and stored the login, but could not read the account: ${known ? error.message : String(error)}`,
+          known ? error.code : "X_UNAVAILABLE",
+          [...(known ? error.suggestions : []), "The login is stored; run `x-axi me` once the cause above is fixed"],
+        );
+      }
+      return {
+        login: { account: `@${account.username}`, scopes: status.scopes, access_token_expires_at: status.access_token_expires_at, storage: status.storage },
+        est_cost: money(recorded),
+        help: ["Run `x-axi mentions` to see who mentioned you", "Run `x-axi auth status` any time to see this login without an API call"],
+      };
+    },
+    logout: async (args) => {
+      parseArgs(args, "logout", []);
+      const report = await deps.auth.logout();
+      try {
+        clearAccount();
+      } catch (error) {
+        warnings.add(`cached account not cleared: ${String(error)}`);
+      }
+      const failed = Object.entries(report.revoke_failed);
+      return {
+        logout: {
+          stored_login: report.had_login ? "deleted" : "none was stored",
+          revoked_at_x: report.revoked.length ? report.revoked.join(", ") : "nothing",
+          ...(failed.length ? { revoke_failed: Object.fromEntries(failed) } : {}),
+        },
+        ...(failed.length ? { help: ["The local login is gone, but X may still consider the token valid until it expires; revoke the app at https://x.com/settings/connected_apps to be sure"] } : {}),
+      };
+    },
+    auth: async (args) => {
+      const [sub, ...rest] = args;
+      if (sub !== "status") throw usage("expected `auth status`", [HELP["auth"] as string]);
+      parseArgs(rest, "auth status", []);
+      const status = await deps.auth.status();
+      const account = readAccount();
+      const { help, ...shown } = status;
+      return { auth: { ...(account ? { account: `@${account.username}` } : {}), ...shown }, ...(help ? { help } : {}) };
     },
   };
 

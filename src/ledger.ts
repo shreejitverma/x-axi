@@ -1,5 +1,5 @@
 import { AxiError } from "axi-sdk-js";
-import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -92,6 +92,15 @@ export function readAccount(): Account | undefined {
 export function writeAccount(account: Account): void {
   migrateFollowLog(readAccount() ?? account);
   writeFileSync(join(ensureDir(), "account.json"), JSON.stringify(account), { mode: 0o600 });
+}
+
+/** After logout the cached account would name a login that no longer exists. The ledger and follow log stay. */
+export function clearAccount(): void {
+  try {
+    unlinkSync(join(stateDir(), "account.json"));
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
 }
 
 export const DAY_MS = 24 * 3600 * 1000;

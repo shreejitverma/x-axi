@@ -1,4 +1,3 @@
-import { execFile } from "node:child_process";
 import { AxiError } from "axi-sdk-js";
 
 export type Json = Record<string, unknown>;
@@ -15,24 +14,6 @@ export interface XClient {
 }
 
 export const SETUP_HINT = "Run `x-axi setup` for the login steps";
-
-/** Token retrieval goes through xurl. Its stderr is discarded so nothing secret can reach output. */
-export function readToken(): Promise<string> {
-  const bin = process.env["XURL_BIN"] ?? "xurl";
-  return new Promise((resolve, reject) => {
-    execFile(bin, ["token"], { timeout: 30_000 }, (error, stdout) => {
-      const token = stdout.trim();
-      if ((error as NodeJS.ErrnoException | null)?.code === "ENOENT") {
-        reject(new AxiError("the xurl binary is not installed", "AUTH_REQUIRED", [SETUP_HINT]));
-      } else if (error || !/^[\x21-\x7e]+$/.test(token)) {
-        // A malformed value must never reach a header, whose errors echo it.
-        reject(new AxiError("not logged in to X", "AUTH_REQUIRED", [SETUP_HINT]));
-      } else {
-        resolve(token);
-      }
-    });
-  });
-}
 
 const X_API_BASE = "https://api.x.com";
 
@@ -57,39 +38,48 @@ function parseBody(text: string): Json {
   return { detail: `unusable response: ${text.slice(0, 200)}` };
 }
 
-export const httpClient: XClient = {
-  async request(method, path, body) {
-    const override = overrideBase();
-    const base = override ?? X_API_BASE;
-    const token = override ? "x-axi-test-token" : await readToken();
-    let response: Response;
-    let text: string;
-    try {
-      response = await fetch(`${base}${path}`, {
-        method,
-        headers: {
-          Authorization: `Bearer ${token}`,
-          ...(body ? { "Content-Type": "application/json" } : {}),
-        },
-        ...(body ? { body: JSON.stringify(body) } : {}),
-        // A followed redirect would replay a write and carry the token elsewhere.
-        redirect: "manual",
-        signal: AbortSignal.timeout(30_000),
-      });
-      text = await response.text();
-    } catch (error) {
-      // Only the failure's name: fetch errors can quote request headers.
-      const cause = (error as { cause?: { code?: string } }).cause?.code;
-      throw new Error(`network failure: ${cause ?? (error as Error).name}`);
-    }
-    const parsed = parseBody(text);
-    if (response.status === 429) {
-      const reset = Number(response.headers.get("x-rate-limit-reset"));
-      parsed["reset_at"] = reset ? new Date(reset * 1000).toISOString() : "unknown";
-    }
-    return { status: response.status, body: parsed };
-  },
-};
+/** `accessToken` is asked for a token only when the request really goes to X; under the loopback override it is never called. */
+export function createHttpClient(accessToken: () => Promise<string>): XClient {
+  return {
+    async request(method, path, body) {
+      const override = overrideBase();
+      const base = override ?? X_API_BASE;
+      const token = override ? "x-axi-test-token" : await accessToken();
+      // A malformed value must never reach a header, whose errors echo it.
+      if (!/^[\x21-\x7e]+$/.test(token)) throw new AxiError("the stored access token is malformed", "AUTH_REQUIRED", ["Run `x-axi logout`, then `x-axi login`"]);
+      return send(method, `${base}${path}`, token, body);
+    },
+  };
+}
+
+async function send(method: Method, url: string, token: string, body: Json | undefined): Promise<ApiResponse> {
+  let response: Response;
+  let text: string;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        Authorization: `Bearer ${token}`,
+        ...(body ? { "Content-Type": "application/json" } : {}),
+      },
+      ...(body ? { body: JSON.stringify(body) } : {}),
+      // A followed redirect would replay a write and carry the token elsewhere.
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
+    });
+    text = await response.text();
+  } catch (error) {
+    // Only the failure's name: fetch errors can quote request headers.
+    const cause = (error as { cause?: { code?: string } }).cause?.code;
+    throw new Error(`network failure: ${cause ?? (error as Error).name}`);
+  }
+  const parsed = parseBody(text);
+  if (response.status === 429) {
+    const reset = Number(response.headers.get("x-rate-limit-reset"));
+    parsed["reset_at"] = reset ? new Date(reset * 1000).toISOString() : "unknown";
+  }
+  return { status: response.status, body: parsed };
+}
 
 export function errorDetail(body: Json): string {
   const nested = Array.isArray(body["errors"]) ? (body["errors"] as Json[])[0] : undefined;
@@ -101,7 +91,11 @@ export function errorDetail(body: Json): string {
 export function toApiError(response: ApiResponse, context: { replyTo?: string; text?: string } = {}): AxiError {
   const detail = errorDetail(response.body);
   const { status } = response;
-  if (status === 401) return new AxiError("X rejected the login", "AUTH_REQUIRED", [SETUP_HINT]);
+  if (status === 401) {
+    return new AxiError("X rejected the access token", "AUTH_REQUIRED", [
+      "Run `x-axi auth status`; if the login was revoked or its scopes changed, run `x-axi login` in your own terminal",
+    ]);
+  }
   if (status === 402 || /credit/i.test(detail)) {
     return new AxiError(detail, "CREDITS_DEPLETED", ["Add credits or raise the spend limit at https://console.x.com"]);
   }

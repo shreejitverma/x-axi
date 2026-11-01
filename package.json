@@ -1,6 +1,6 @@
 {
   "name": "x-axi",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "AXI-compliant CLI for X: read data and manage your account, with a human approval gate on every write",
   "type": "module",
