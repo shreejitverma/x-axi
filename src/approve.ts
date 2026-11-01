@@ -23,7 +23,7 @@ const SCRIPT = `on run argv
   return button returned of answer
 end run`;
 
-function counted(count: number, noun: string): string {
+export function counted(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 

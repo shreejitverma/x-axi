@@ -436,12 +436,44 @@ describe("review regressions", () => {
     expect(h.writes()).toHaveLength(1);
   });
 
-  it("does not call a permission error already gone", async () => {
-    for (const body of [{}, { errors: [{ title: "Authorization Error", detail: "cannot view" }] }]) {
+  const SUSPENDED = {
+    errors: [{ title: "Forbidden", detail: "User has been suspended: [alice].", type: "https://api.twitter.com/2/problems/resource-not-found" }],
+  };
+  const UNAUTHORIZED = { errors: [{ title: "Authorization Error", detail: "cannot view" }] };
+  const MISSING = {
+    errors: [{ title: "Not Found Error", detail: "Could not find user.", type: "https://api.twitter.com/2/problems/resource-not-found" }],
+  };
+
+  it.each([
+    ["an empty 200", {}, "X_UNAVAILABLE"],
+    ["an unusable body", { detail: "unusable response: <html>" }, "X_UNAVAILABLE"],
+    ["a suspension", SUSPENDED, "FORBIDDEN"],
+    ["an authorization error", UNAUTHORIZED, "FORBIDDEN"],
+  ])("does not call %s already gone", async (_name, body, code) => {
+    const h = harness(() => ok(body));
+    await expect(h.commands["delete"]!(["50"])).rejects.toMatchObject({ code });
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  describe.each([
+    ["user", ["alice"]],
+    ["follow", ["alice"]],
+    ["unfollow", ["alice"]],
+    ["dm", ["send", "alice", "hi"]],
+    ["dm", ["read", "alice"]],
+  ])("%s %j", (command, args) => {
+    it.each([
+      ["an empty 200", {}, "X_UNAVAILABLE"],
+      ["an unusable body", { detail: "unusable response: <html>" }, "X_UNAVAILABLE"],
+      ["a suspension", SUSPENDED, "FORBIDDEN"],
+      ["an authorization error", UNAUTHORIZED, "FORBIDDEN"],
+      ["X's not-found error", MISSING, "NOT_FOUND"],
+    ])("reports %s from the user lookup as its own code", async (_name, body, code) => {
       const h = harness(() => ok(body));
-      await expect(h.commands["delete"]!(["50"])).rejects.toMatchObject({ code: "FORBIDDEN" });
+      await expect(h.commands[command]!(args)).rejects.toMatchObject({ code });
       expect(h.approve).not.toHaveBeenCalled();
-    }
+      expect(h.writes()).toEqual([]);
+    });
   });
 
   it("does not turn an unusable 200 into zero results", async () => {
@@ -758,6 +790,23 @@ describe("follow log", () => {
     expect(h.writes()).toHaveLength(2);
   });
 
+  it.each([
+    [1, "Follow 1 account over about 1 minute as"],
+    [3, "Follow 3 accounts over about 1 minute as"],
+    [6, "Follow 6 accounts over about 2 minutes as"],
+  ])("names a batch of %i correctly in the dialog", async (count, wording) => {
+    const h = harness(social);
+    await withoutSleep(h, social)["follow-file"]!([queueFile(Array.from({ length: count }, (_, i) => String(100 + i)))]);
+    expect(formatApproval(h.requests[0]!)).toContain(wording);
+  });
+
+  it("says one follow is left when one is", async () => {
+    seedRecent(398);
+    const h = harness(social);
+    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1"])) as { help: string[] };
+    expect(out.help[0]).toContain("1 follow left");
+  });
+
   it("says in the dialog that usernames come from the file and were not verified", async () => {
     const h = harness(social);
     const file = queueFile(["100"]);
@@ -940,7 +989,7 @@ describe("follow log", () => {
   it("offers to continue now while the cap has room", async () => {
     const h = harness(social);
     const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1"])) as { help: string[] };
-    expect(out.help[0]).toContain("399 follows remain");
+    expect(out.help[0]).toContain("399 follows left");
     expect(out.help[0]).not.toContain("tomorrow");
   });
 

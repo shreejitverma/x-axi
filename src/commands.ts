@@ -1,6 +1,6 @@
 import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
-import type { ApprovalBody, ApprovalResult, Approver } from "./approve.js";
+import { counted, type ApprovalBody, type ApprovalResult, type Approver } from "./approve.js";
 import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseOutgoingText, parsePostId, usage } from "./args.js";
 import { readFileSync } from "node:fs";
 import { assertFollowLogReadable, DAY_MS, logFollow, logFollowAttempt, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
@@ -38,6 +38,24 @@ async function get(deps: Deps, path: string): Promise<ApiResponse> {
   const response = await read(deps, path);
   if (response.status >= 300) throw toApiError(response);
   return response;
+}
+
+/** X reports a missing resource as a 200 whose error title says Not Found. Its other errors can carry a not-found type, as a suspension does. */
+function saysNotFound(body: Json): boolean {
+  const errors = body["errors"];
+  return Array.isArray(errors) && (errors as Json[]).some((error) => /not.?found/i.test(String(error["title"])));
+}
+
+function unreadable(what: string, body: Json): AxiError {
+  const code = Array.isArray(body["errors"]) ? "FORBIDDEN" : "X_UNAVAILABLE";
+  return new AxiError(`X could not return ${what}: ${errorDetail(body)}`, code);
+}
+
+function foundUser(body: Json, handle: string): Json {
+  const data = body["data"] as Json | undefined;
+  if (data?.["id"]) return data;
+  if (saysNotFound(body)) throw new AxiError(`no X user named @${handle}`, "NOT_FOUND");
+  throw unreadable(`@${handle}`, body);
 }
 
 function money(usd: number): string {
@@ -238,10 +256,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     if (response.status >= 300) throw toApiError(response);
     const post = response.body["data"] as Json | undefined;
     if (!post) {
-      // X reports a missing post as a 200 whose errors say Not Found. Anything else is not "missing".
-      const errors = response.body["errors"];
-      if (Array.isArray(errors) && /not.?found/i.test(JSON.stringify(errors))) return undefined;
-      throw new AxiError(`X could not return post ${id}: ${errorDetail(response.body)}`, "FORBIDDEN");
+      if (saysNotFound(response.body)) return undefined;
+      throw unreadable(`post ${id}`, response.body);
     }
     spend("view", RATES.postRead + includedUsers(response.body) * RATES.userRead);
     const author = usernames(response.body).get(String(post["author_id"])) ?? "?";
@@ -250,8 +266,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
 
   const resolveUser = async (handle: string): Promise<Account> => {
     const response = await get(deps, `/2/users/by/username/${handle}`);
-    const data = response.body["data"] as Json | undefined;
-    if (!data?.["id"]) throw new AxiError(`no X user named @${handle}`, "NOT_FOUND");
+    const data = foundUser(response.body, handle);
     spend("user", RATES.userRead);
     return { id: String(data["id"]), username: String(data["username"]) };
   };
@@ -400,8 +415,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const parsed = parseArgs(args, "user", []);
       const handle = parseHandle(onePositional(parsed, "user"));
       const response = await get(deps, `/2/users/by/username/${handle}?user.fields=description,public_metrics`);
-      const data = response.body["data"] as Json | undefined;
-      if (!data) throw new AxiError(`no X user named @${handle}`, "NOT_FOUND");
+      const data = foundUser(response.body, handle);
       const metrics = (data["public_metrics"] ?? {}) as Json;
       return {
         user: {
@@ -531,7 +545,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const names = batch.slice(0, 10).map((u) => `@${u.username}`).join(", ");
       const more = batch.length > 10 ? `, and ${batch.length - 10} more` : "";
       const provenance = `Usernames come from ${displayText(file)} and were not verified with X.`;
-      await gate(`Follow ${batch.length} accounts over about ${Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000)} minutes`, account, { content: `${names}${more}\n\n${provenance}` }, usd);
+      await gate(`Follow ${counted(batch.length, "account")} over about ${counted(Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000), "minute")}`, account, { content: `${names}${more}\n\n${provenance}` }, usd);
       const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
       let followed = 0;
       let requested = 0;
@@ -564,7 +578,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const stillRecent = recentFollows(recent);
       let help: string[] = [];
       if (stopped) help = [...stoppedHelp, "Fix the reason above before running again; do not retry in a loop"];
-      else if (left > 0 && stillRecent.length < FOLLOW_DAILY_CAP) help = [`${again} to continue; ${FOLLOW_DAILY_CAP - stillRecent.length} follows remain in the rolling 24 hours`];
+      else if (left > 0 && stillRecent.length < FOLLOW_DAILY_CAP) help = [`${again} to continue; ${counted(FOLLOW_DAILY_CAP - stillRecent.length, "follow")} left in the rolling 24 hours`];
       else if (left > 0) help = [`${again} after ${capReopensAt(stillRecent)} to continue`];
       return {
         follow_file: { followed, requested, remaining: left, status: stopped ? "stopped early" : "batch complete" },
