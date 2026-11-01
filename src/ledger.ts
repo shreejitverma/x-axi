@@ -89,24 +89,86 @@ export function readAccount(): Account | undefined {
 }
 
 export function writeAccount(account: Account): void {
+  migrateFollowLog(readAccount() ?? account);
   writeFileSync(join(ensureDir(), "account.json"), JSON.stringify(account), { mode: 0o600 });
 }
 
-/** Accounts followed through this tool, by user ID, with the time of each follow. */
-export type FollowLog = Record<string, string>;
+export const DAY_MS = 24 * 3600 * 1000;
 
-export function readFollowLog(): FollowLog {
-  try {
-    return JSON.parse(readFileSync(join(stateDir(), "follows.json"), "utf8")) as FollowLog;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw error; // A corrupt log must stop a batch, or the daily cap would silently reset.
-  }
+/** What one X account did through this tool. */
+export interface FollowRecord {
+  /** Accounts currently followed, by user ID. This is the resume state, so an unfollow removes the entry. */
+  following: Record<string, string>;
+  /** The time of every follow in the last 24 hours. This is the rate history, so an unfollow keeps it. */
+  events: string[];
 }
 
-export function writeFollowLog(log: FollowLog): void {
+interface FollowFile {
+  version: 2;
+  accounts: Record<string, FollowRecord>;
+}
+
+/**
+ * Version 1 was a flat map of user ID to time, with no owner. Only account.json
+ * can name that owner, so this must run before account.json is overwritten.
+ * A missing or corrupt file is left for readFollows to handle.
+ */
+function migrateFollowLog(owner: Account): void {
+  let value: unknown;
+  try {
+    value = JSON.parse(readFileSync(join(stateDir(), "follows.json"), "utf8"));
+  } catch {
+    return;
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value) || "version" in value) return;
+  const following = value as Record<string, string>;
+  saveFollowFile({ version: 2, accounts: { [owner.id]: { following, events: Object.values(following) } } });
+}
+
+function loadFollowFile(): FollowFile {
+  let raw: string;
+  try {
+    raw = readFileSync(join(stateDir(), "follows.json"), "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 2, accounts: {} };
+    throw error;
+  }
+  // A corrupt log must stop a batch, or the daily cap would silently reset.
+  const file = JSON.parse(raw) as FollowFile | null;
+  if (file?.version !== 2 || !file.accounts) throw new Error("follows.json is not a version 2 follow log");
+  return file;
+}
+
+function saveFollowFile(file: FollowFile): void {
   const dir = ensureDir();
   const temp = join(dir, "follows.json.tmp");
-  writeFileSync(temp, JSON.stringify(log), { mode: 0o600 });
+  writeFileSync(temp, JSON.stringify(file), { mode: 0o600 });
   renameSync(temp, join(dir, "follows.json"));
+}
+
+export function readFollows(accountId: string): FollowRecord {
+  return loadFollowFile().accounts[accountId] ?? { following: {}, events: [] };
+}
+
+/** Throws if a later log update would fail on the current file, so a problem can stop a write before it is sent. */
+export function assertFollowLogReadable(): void {
+  loadFollowFile();
+}
+
+export function logFollow(accountId: string, targetId: string, now = new Date()): void {
+  const file = loadFollowFile();
+  const record = file.accounts[accountId] ?? { following: {}, events: [] };
+  const at = now.toISOString();
+  record.following[targetId] = at;
+  record.events = [...record.events.filter((event) => now.getTime() - new Date(event).getTime() < DAY_MS), at];
+  file.accounts[accountId] = record;
+  saveFollowFile(file);
+}
+
+export function logUnfollow(accountId: string, targetId: string): void {
+  const file = loadFollowFile();
+  const record = file.accounts[accountId];
+  if (!record) return;
+  delete record.following[targetId];
+  saveFollowFile(file);
 }

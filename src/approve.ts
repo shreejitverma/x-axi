@@ -21,11 +21,13 @@ const SCRIPT = `on run argv
   return button returned of answer
 end run`;
 
+export const CONTEXT_LABEL = "context from X, not sent";
+
 export function formatApproval(request: ApprovalRequest): string {
   const cost = request.estCostUsd === null ? "unknown" : `about $${request.estCostUsd.toFixed(3)}`;
   // The content comes first and context last, flattened, so text from X cannot pose as it.
   const lines = [`${request.action} as @${request.account} (${cost})`, "", request.content];
-  if (request.context) lines.push("", "----- context from X, not sent -----", request.context);
+  if (request.context) lines.push("", `----- ${CONTEXT_LABEL} -----`, request.context);
   return lines.join("\n");
 }
 

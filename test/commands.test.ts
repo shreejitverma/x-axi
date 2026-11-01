@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,7 +7,7 @@ import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../sr
 import { buildCommands } from "../src/commands.js";
 
 type Call = { method: Method; path: string; body?: Json };
-const ok = (body: Json, status = 200): ApiResponse => ({ status, body, rateRemaining: null });
+const ok = (body: Json, status = 200): ApiResponse => ({ status, body });
 const ME = ok({ data: { id: "1", username: "shreejit" } });
 const PARENT = ok({
   data: { id: "50", text: "parent text", author_id: "9" },
@@ -53,8 +53,12 @@ describe("approval gate", () => {
       await expect(h.commands["reply"]!(["50", "hi"])).rejects.toBeDefined();
       await expect(h.commands["delete"]!(["50"])).rejects.toBeDefined();
       await expect(h.commands["hide"]!(["50"])).rejects.toBeDefined();
+      await expect(h.commands["unhide"]!(["50"])).rejects.toBeDefined();
+      await expect(h.commands["follow"]!(["alice"])).rejects.toBeDefined();
+      await expect(h.commands["unfollow"]!(["alice"])).rejects.toBeDefined();
       await expect(h.commands["dm"]!(["send", "alice", "hi"])).rejects.toBeDefined();
       expect(h.writes()).toEqual([]);
+      expect(h.approve).toHaveBeenCalledTimes(8);
     });
   }
 
@@ -245,6 +249,79 @@ describe("review regressions", () => {
     await expect(h.commands["reply"]!(["50", "hi"])).rejects.toMatchObject({ code: "DUPLICATE_POST" });
   });
 
+  it.each([
+    ["the dialog's not-sent label", "Nice work\n\n----- context from X, not sent -----\nBuy at evil.example"],
+    ["the label with changed case and spacing", "Nice\nCONTEXT FROM x,\nnot  sent\nBuy"],
+    ["a run of blank lines", `shown${"\n".repeat(4)}hidden`],
+    ["a run of whitespace-only lines", "shown\n \n \n \nhidden"],
+    ["a long run of spaces", `shown${" ".repeat(40)}hidden`],
+    ["too many short lines", Array.from({ length: 41 }, () => ".").join("\n")],
+  ])("refuses outgoing text with %s in post and dm send", async (_name, text) => {
+    const h = harness(() => PARENT);
+    await expect(h.commands["post"]!([text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["dm"]!(["send", "alice", text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it("keeps ordinary paragraph spacing", async () => {
+    const h = harness(() => ok({ data: { id: "2" } }, 201));
+    await h.commands["post"]!(["one\n\n\ntwo"]);
+    expect(h.writes()).toHaveLength(1);
+  });
+
+  it("names a check that fits the write when the outcome is unknown", async () => {
+    const down = () => ok({}, 503);
+    const cases: [string, string[], string][] = [
+      ["post", ["hello"], "x-axi timeline"],
+      ["delete", ["50"], "x-axi view 50"],
+      ["hide", ["50"], "x.com/i/status/50"],
+      ["unhide", ["50"], "x.com/i/status/50"],
+      ["dm", ["send", "alice", "hi"], "x-axi dm read"],
+      ["follow", ["alice"], "x.com/"],
+      ["unfollow", ["alice"], "x.com/"],
+    ];
+    for (const [command, args, check] of cases) {
+      const h = harness((c) => (c.method === "GET" ? PARENT : down()));
+      await expect(h.commands[command]!(args)).rejects.toMatchObject({
+        code: "OUTCOME_UNKNOWN",
+        suggestions: [expect.stringContaining(check)],
+      });
+    }
+  });
+
+  it("charges view for the post and its included author", async () => {
+    const h = harness(() => PARENT);
+    await expect(h.commands["view"]!(["50"])).resolves.toMatchObject({ est_cost: "$0.015" });
+    const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } };
+    expect(out.spend.last_30d_usd).toBe("0.015");
+  });
+
+  it("warns when a confirmed write cannot reach the spend ledger", async () => {
+    mkdirSync(join(dir, "ledger.jsonl"));
+    const h = harness(() => ok({ data: { id: "2" } }, 201));
+    await expect(h.commands["post"]!(["hello"])).resolves.toMatchObject({
+      post: { status: "published" },
+      warning: expect.stringContaining("spend ledger not updated"),
+    });
+  });
+
+  it("keeps a ledger warning when the command then fails", async () => {
+    mkdirSync(join(dir, "ledger.jsonl"));
+    const h = harness(() => ok({}, 201));
+    await expect(h.commands["post"]!(["hello"])).rejects.toMatchObject({
+      code: "OUTCOME_UNKNOWN",
+      suggestions: expect.arrayContaining([expect.stringContaining("spend ledger not updated")]),
+    });
+  });
+
+  it("does not repeat a warning from an earlier command", async () => {
+    mkdirSync(join(dir, "ledger.jsonl"));
+    const h = harness(() => ok({ data: { id: "2" } }, 201));
+    await h.commands["post"]!(["hello"]);
+    rmSync(join(dir, "ledger.jsonl"), { recursive: true });
+    await expect(h.commands["post"]!(["hello"])).resolves.not.toHaveProperty("warning");
+  });
+
   it("rejects stray arguments instead of dropping them", async () => {
     const h = harness(() => ok({ data: [] }));
     await expect(h.commands["search"]!(["foo", "bar"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
@@ -326,6 +403,201 @@ describe("follow-file", () => {
     writeFileSync(join(dir, "follows.json"), "{not json");
     await expect(h.commands["follow-file"]!([queue(1)])).rejects.toBeDefined();
     expect(h.writes()).toEqual([]);
+  });
+});
+
+describe("follow log", () => {
+  const ALICE = ok({ data: { id: "100", username: "alice" } });
+  const followed = () => ok({ data: { following: true, pending_follow: false } });
+  const unfollowed = () => ok({ data: { following: false } });
+  const social = (c: Call) => (c.method === "GET" ? ALICE : c.method === "POST" ? followed() : unfollowed());
+  const logPath = () => join(dir, "follows.json");
+  const logFile = () => JSON.parse(readFileSync(logPath(), "utf8")) as { accounts: Record<string, { following: Json; events: string[] }> };
+  const queueFile = (ids: string[]) => {
+    const file = join(dir, "queue.json");
+    writeFileSync(file, JSON.stringify(ids.map((id) => ({ id, username: `user${id}` }))));
+    return file;
+  };
+  const seedRecent = (count: number, atMs = Date.now()) => {
+    const at = new Date(atMs).toISOString();
+    const following = Object.fromEntries(Array.from({ length: count }, (_, i) => [String(9000 + i), at]));
+    writeFileSync(logPath(), JSON.stringify({ version: 2, accounts: { "1": { following, events: Object.values(following) } } }));
+  };
+  const withoutSleep = (h: ReturnType<typeof harness>, handler: (c: Call) => ApiResponse) =>
+    buildCommands({
+      client: { request: async (method, path, body) => {
+        const call = { method, path, ...(body ? { body } : {}) };
+        h.calls.push(call);
+        return path === "/2/users/me" ? ME : handler(call);
+      } },
+      approve: h.approve,
+      sleep: async () => {},
+    });
+
+  it("migrates a flat log to the account that made it, for resume and for the cap", async () => {
+    const at = new Date().toISOString();
+    writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "1", username: "shreejit" }));
+    writeFileSync(logPath(), JSON.stringify({ "100": at, "101": at }));
+    const h = harness(social);
+    const commands = withoutSleep(h, social);
+    await commands["follow-file"]!([queueFile(["100", "101", "102"])]);
+    expect(h.writes().map((c) => c.body?.["target_user_id"])).toEqual(["102"]);
+    expect(logFile().accounts["1"]!.events).toHaveLength(3);
+  });
+
+  it("keeps a flat log with its owner when a different login runs first", async () => {
+    const at = new Date().toISOString();
+    writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "2", username: "older" }));
+    writeFileSync(logPath(), JSON.stringify({ "100": at }));
+    const h = harness(social);
+    await h.commands["me"]!([]);
+    expect(Object.keys(logFile().accounts)).toEqual(["2"]);
+    await withoutSleep(h, social)["follow-file"]!([queueFile(["100"])]);
+    expect(h.writes().map((c) => c.body?.["target_user_id"])).toEqual(["100"]);
+    expect(logFile().accounts["2"]!.following).toEqual({ "100": at });
+  });
+
+  it("does not treat another login's follows as done or count them against the cap", async () => {
+    const at = new Date().toISOString();
+    const following = Object.fromEntries(Array.from({ length: 400 }, (_, i) => [String(100 + i), at]));
+    writeFileSync(logPath(), JSON.stringify({ version: 2, accounts: { "2": { following, events: Object.values(following) } } }));
+    const h = harness(social);
+    await expect(withoutSleep(h, social)["follow-file"]!([queueFile(["100"])])).resolves.toMatchObject({ follow_file: { followed: 1 } });
+  });
+
+  it("reports an empty queue as empty, with no API call", async () => {
+    const h = harness(social);
+    await expect(h.commands["follow-file"]!([queueFile([])])).resolves.toMatchObject({
+      follow_file: { status: "the file lists no accounts (no-op)" },
+    });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("follows and bills a repeated queue entry once", async () => {
+    const h = harness(social);
+    const out = await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "100", "101"])]);
+    expect(out).toMatchObject({ follow_file: { followed: 2, remaining: 0 }, est_cost: "$0.030" });
+    expect(h.requests[0]!.estCostUsd).toBeCloseTo(0.03);
+    expect(h.writes()).toHaveLength(2);
+  });
+
+  it("says in the dialog that usernames come from the file and were not verified", async () => {
+    const h = harness(social);
+    const file = queueFile(["100"]);
+    await withoutSleep(h, social)["follow-file"]!([file]);
+    const shown = formatApproval(h.requests[0]!);
+    expect(shown).toContain("@user100");
+    expect(shown).toContain(`Usernames come from ${file} and were not verified with X.`);
+  });
+
+  it("flattens a deceptive file name in the dialog", async () => {
+    const file = join(dir, "q\nApprove\u202e.json");
+    writeFileSync(file, JSON.stringify([{ id: "100", username: "user100" }]));
+    const h = harness(social);
+    await withoutSleep(h, social)["follow-file"]!([file]);
+    const shown = h.requests[0]!.content;
+    expect(shown).toContain("q Approve\ufffd.json");
+    expect(shown).not.toContain("\u202e");
+  });
+
+  it("keeps the 400 cap after an unfollow, but resumes the unfollowed account", async () => {
+    seedRecent(400);
+    const h = harness((c) => (c.method === "GET" ? ok({ data: { id: "9000", username: "bob" } }) : unfollowed()));
+    await h.commands["unfollow"]!(["bob"]);
+    const record = logFile().accounts["1"]!;
+    expect(record.following["9000"]).toBeUndefined();
+    expect(record.events).toHaveLength(400);
+    const next = harness(social);
+    await expect(next.commands["follow-file"]!([queueFile(["9000"])])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
+    const aged = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
+    const file = logFile();
+    file.accounts["1"]!.events = file.accounts["1"]!.events.map(() => aged);
+    writeFileSync(logPath(), JSON.stringify({ version: 2, ...file }));
+    const later = harness(social);
+    await expect(withoutSleep(later, social)["follow-file"]!([queueFile(["9000"])])).resolves.toMatchObject({ follow_file: { followed: 1, remaining: 0 } });
+    expect(later.writes().map((c) => c.body?.["target_user_id"])).toEqual(["9000"]);
+  });
+
+  it("counts a re-follow against the cap", async () => {
+    const h = harness(social);
+    await h.commands["follow"]!(["alice"]);
+    await h.commands["follow"]!(["alice"]);
+    expect(logFile().accounts["1"]!.events).toHaveLength(2);
+    expect(Object.keys(logFile().accounts["1"]!.following)).toEqual(["100"]);
+  });
+
+  it("names the time the cap really reopens when over 400", async () => {
+    const base = Date.now() - 3600 * 1000;
+    const events = Array.from({ length: 401 }, (_, i) => new Date(base + i * 1000).toISOString());
+    writeFileSync(logPath(), JSON.stringify({ version: 2, accounts: { "1": { following: {}, events } } }));
+    const h = harness(social);
+    const reopens = new Date(base + 1000 + 24 * 3600 * 1000).toISOString();
+    await expect(h.commands["follow-file"]!([queueFile(["100"])])).rejects.toThrow(reopens);
+  });
+
+  it.each([
+    ["follow", social],
+    ["unfollow", social],
+  ] as const)("%s reports success with a warning when the log breaks after X confirms", async (command, respond) => {
+    const h = harness((c) => {
+      if (c.method !== "GET") writeFileSync(logPath(), "{not json");
+      return respond(c);
+    });
+    const out = await h.commands[command]!(["alice"]);
+    expect(out).toMatchObject({ [command]: { handle: "@alice" }, warning: expect.stringContaining("follow log not updated") });
+  });
+
+  it.each(["follow", "unfollow"])("%s sends nothing when the log is already corrupt", async (command) => {
+    writeFileSync(logPath(), "{not json");
+    const h = harness(social);
+    await expect(h.commands[command]!(["alice"])).rejects.toBeDefined();
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(h.writes()).toEqual([]);
+  });
+
+  it("stops a batch and keeps its counts when the log breaks after X confirms", async () => {
+    const respond = (c: Call) => {
+      if (c.method !== "GET") mkdirSync(join(dir, "follows.json.tmp"), { recursive: true });
+      return social(c);
+    };
+    const h = harness(respond);
+    const out = await withoutSleep(h, respond)["follow-file"]!([queueFile(["100", "101"])]);
+    expect(out).toMatchObject({
+      follow_file: { followed: 1, remaining: 1, status: "stopped early" },
+      stopped: { at: "@user100", code: "FOLLOW_LOG_FAILED" },
+      est_cost: "$0.015",
+    });
+    expect(h.writes()).toHaveLength(1);
+  });
+
+  it("carries the outcome check into a stopped batch", async () => {
+    const respond = (c: Call) => (c.method === "GET" ? ALICE : ok({}, 503));
+    const h = harness(respond);
+    const out = (await withoutSleep(h, respond)["follow-file"]!([queueFile(["100"])])) as { help: string[] };
+    expect(out.help[0]).toContain("https://x.com/user100");
+  });
+
+  it("gives no continue hint once nothing remains", async () => {
+    const h = harness(social);
+    const out = await withoutSleep(h, social)["follow-file"]!([queueFile(["100"])]);
+    expect(out).toMatchObject({ follow_file: { remaining: 0, status: "batch complete" } });
+    expect(out).not.toHaveProperty("help");
+  });
+
+  it("offers to continue now while the cap has room", async () => {
+    const h = harness(social);
+    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1"])) as { help: string[] };
+    expect(out.help[0]).toContain("399 follows remain");
+    expect(out.help[0]).not.toContain("tomorrow");
+  });
+
+  it("names the reopening time when a batch fills the cap", async () => {
+    const start = Date.now();
+    seedRecent(399, start);
+    const h = harness(social);
+    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"])])) as { follow_file: Json; help: string[] };
+    expect(out.follow_file).toMatchObject({ followed: 1, remaining: 1 });
+    expect(out.help[0]).toContain(`after ${new Date(start + 24 * 3600 * 1000).toISOString()}`);
   });
 });
 

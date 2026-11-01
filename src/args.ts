@@ -1,4 +1,5 @@
 import { AxiError } from "axi-sdk-js";
+import { CONTEXT_LABEL } from "./approve.js";
 
 export interface Parsed {
   positional: string[];
@@ -67,13 +68,20 @@ export function parseHandle(value: string | undefined): string {
 // (tag characters included), plus blank fillers and hidden variation selectors.
 const DECEPTIVE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Co}\p{Cn}\p{Cs}͏ᅟᅠ឴឵᠋-᠍⠀ㅤ︀-︎ﾠ\u{e0100}-\u{e01ef}]/u;
 const MAX_APPROVABLE = 4000;
+const MAX_APPROVABLE_LINES = 40;
+// Three blank lines in a row, or a long run of spaces, could push text out of view in the dialog.
+const HIDING_GAP = /(?:[^\S\n]*\n){4}|[^\S\n]{40}/;
 
 /** Length is left to X because the limit depends on the account. */
 export function parseOutgoingText(value: string | undefined): string {
   if (!value?.trim()) throw usage("the text must not be empty");
   if (DECEPTIVE.test(value.replaceAll("\n", ""))) throw usage("the text contains invisible or control characters; remove them");
-  if (value.length > MAX_APPROVABLE) {
-    throw usage(`the text is over ${MAX_APPROVABLE} characters, too long to review in the approval dialog`);
+  if (value.length > MAX_APPROVABLE || value.split("\n").length > MAX_APPROVABLE_LINES) {
+    throw usage(`the text is over ${MAX_APPROVABLE} characters or ${MAX_APPROVABLE_LINES} lines, too long to review in the approval dialog`);
+  }
+  if (HIDING_GAP.test(value)) throw usage("the text has a long run of blank lines or spaces; shorten it");
+  if (value.replace(/\s+/g, " ").toLowerCase().includes(CONTEXT_LABEL.toLowerCase())) {
+    throw usage(`the text must not contain "${CONTEXT_LABEL}", which the approval dialog uses to mark text that is not sent`);
   }
   return value;
 }

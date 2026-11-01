@@ -1,6 +1,6 @@
 // Runs the built binary with a fake xurl and a loopback X API.
 import { execFile } from "node:child_process";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -15,7 +15,7 @@ const seen: { method: string; url: string; auth: string | undefined }[] = [];
 
 beforeAll(async () => {
   dir = mkdtempSync(join(tmpdir(), "x-axi-e2e-"));
-  writeFileSync(join(dir, "xurl"), "#!/bin/sh\necho SECRET_TOKEN_VALUE\n");
+  writeFileSync(join(dir, "xurl"), `#!/bin/sh\ntouch "${join(dir, "xurl-ran")}"\necho SECRET_TOKEN_VALUE\n`);
   chmodSync(join(dir, "xurl"), 0o755);
   server = createServer((req, res) => {
     seen.push({ method: req.method ?? "", url: req.url ?? "", auth: req.headers.authorization });
@@ -44,13 +44,12 @@ function run(args: string[], env: NodeJS.ProcessEnv = {}): Promise<{ out: string
   });
 }
 
-it("reads through the binary, sends the token, and never prints it", async () => {
+it("reads through the binary and keeps the real token away from an override", async () => {
   const { out, code } = await run(["mentions"]);
   expect(code).toBe(0);
   expect(out).toContain("alice");
-  expect(out).not.toContain("SECRET_TOKEN_VALUE");
-  expect(seen.at(-1)?.auth).toBe("Bearer SECRET_TOKEN_VALUE");
-  expect(readFileSync(join(dir, "ledger.jsonl"), "utf8")).not.toContain("SECRET_TOKEN_VALUE");
+  expect(seen.at(-1)?.auth).toBe("Bearer x-axi-test-token");
+  expect(existsSync(join(dir, "xurl-ran"))).toBe(false);
 });
 
 it("refuses to send the token to a non-loopback override", async () => {
@@ -69,7 +68,7 @@ it("exits 2 on bad usage and does not call the API", async () => {
 it("never prints a malformed token", async () => {
   writeFileSync(join(dir, "badxurl"), "#!/bin/sh\nprintf 'SECRET_TOKEN_VALUE\\nsecond line\\n'\n");
   chmodSync(join(dir, "badxurl"), 0o755);
-  const { out, code } = await run(["me"], { XURL_BIN: join(dir, "badxurl") });
+  const { out, code } = await run(["me"], { XURL_BIN: join(dir, "badxurl"), X_AXI_API_BASE: "" });
   expect(code).toBe(1);
   expect(out).toContain("AUTH_REQUIRED");
   expect(out).not.toContain("SECRET_TOKEN_VALUE");

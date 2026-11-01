@@ -6,7 +6,6 @@ export type Json = Record<string, unknown>;
 export interface ApiResponse {
   status: number;
   body: Json;
-  rateRemaining: string | null;
 }
 
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
@@ -35,10 +34,12 @@ export function readToken(): Promise<string> {
   });
 }
 
-/** The override exists for the end-to-end test and may only target loopback, so the token cannot be redirected. */
-export function apiBase(): string {
+const X_API_BASE = "https://api.x.com";
+
+/** The override exists for the end-to-end test. It may only target loopback, and it never receives the real token. */
+function overrideBase(): string | undefined {
   const override = process.env["X_AXI_API_BASE"];
-  if (!override) return "https://api.x.com";
+  if (!override) return undefined;
   if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(override)) {
     throw new AxiError("X_AXI_API_BASE may only point at loopback", "VALIDATION_ERROR");
   }
@@ -58,8 +59,9 @@ function parseBody(text: string): Json {
 
 export const httpClient: XClient = {
   async request(method, path, body) {
-    const token = await readToken();
-    const base = apiBase();
+    const override = overrideBase();
+    const base = override ?? X_API_BASE;
+    const token = override ? "x-axi-test-token" : await readToken();
     let response: Response;
     let text: string;
     try {
@@ -85,11 +87,7 @@ export const httpClient: XClient = {
       const reset = Number(response.headers.get("x-rate-limit-reset"));
       parsed["reset_at"] = reset ? new Date(reset * 1000).toISOString() : "unknown";
     }
-    return {
-      status: response.status,
-      body: parsed,
-      rateRemaining: response.headers.get("x-rate-limit-remaining"),
-    };
+    return { status: response.status, body: parsed };
   },
 };
 
