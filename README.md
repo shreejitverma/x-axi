@@ -114,7 +114,7 @@ Do not rerun a stopped thread, because the posted parts are public.
 
 A file's extension must agree with its bytes.
 MP4 means a plain MP4 brand and WebM means the WebM DocType, so HEIC, AVIF, M4A, 3GP, and other Matroska files are refused.
-These checks run before any API call, and the dialog shows the file name, type, and size.
+These checks run before any API call, and the dialog shows the file's full path, type, and size.
 The upload runs only after approval, through `POST /2/media/upload/initialize`, then `POST /2/media/upload/{id}/append` in multipart chunks of at most 5,000,000 bytes indexed from 0, then `POST /2/media/upload/{id}/finalize`, then `GET /2/media/upload` while X reports processing, for at most 10 minutes.
 A failed chunk stops the upload and is not retried, and the error says nothing was posted.
 A file that changes after approval is refused.

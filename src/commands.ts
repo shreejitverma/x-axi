@@ -1,7 +1,7 @@
 import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
 import { counted, type ApprovalBody, type ApprovalResult, type Approver } from "./approve.js";
-import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseMaxSpend, parseOutgoingText, parsePostId, usage, type Parsed } from "./args.js";
+import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseMaxSpend, parseOutgoingText, parsePostId, shortenPath, usage, type Parsed } from "./args.js";
 import type { AuthService } from "./auth.js";
 import { configPath, DEFAULT_REDIRECT_URI, parseClientId, readConfig, writeConfig } from "./config.js";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -33,7 +33,6 @@ const DRY_RUN = "--dry-run";
 export type Output = Record<string, unknown>;
 
 const PREVIEW = 280;
-const MAX_SHOWN_PATH = 120;
 const POST_FIELDS = "tweet.fields=created_at,public_metrics,conversation_id,note_tweet,entities&expansions=author_id&user.fields=username";
 
 // ---- reading -----------------------------------------------------------------
@@ -84,14 +83,6 @@ function usernames(body: Json): Map<string, string> {
 function fullText(post: Json): string {
   const note = post["note_tweet"] as { text?: string } | undefined;
   return note?.text ?? String(post["text"] ?? "");
-}
-
-/** Keeps both ends of a path, because the name of the file and where it sits are what identify it. */
-function shortenPath(path: string): string {
-  const characters = Array.from(path);
-  if (characters.length <= MAX_SHOWN_PATH) return path;
-  const end = MAX_SHOWN_PATH / 2;
-  return `${characters.slice(0, end).join("")} ...[${characters.length} characters in full]... ${characters.slice(-end).join("")}`;
 }
 
 function truncate(text: string, full: boolean): string {
@@ -635,6 +626,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     if (out !== undefined) refuseExisting(String(out));
     const target = await listTarget(handle, side);
     const name = `@${target.username}`;
+    const rerun = `x-axi ${side}${handle ? ` ${handle}` : ""}`;
+    const keepCap = maxSpend === undefined ? "" : ` --max-spend ${maxSpend}`;
     const total = target.total ?? "unknown";
     const count = all ? target.total : Math.min(limit, target.total ?? limit);
     const estimate = count === undefined ? undefined : recorded + count * target.rate;
@@ -653,7 +646,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         ...(page.partial ? { partial_errors: `${page.partial}: ${errorDetail(page.body)}` } : {}),
         ...(page.next ? { next_token: page.next } : {}),
         est_cost: money(recorded),
-        ...(page.next ? { help: [`Run \`x-axi ${side}${handle ? ` ${handle}` : ""} --limit ${limit} --next ${page.next}\` for more, or --all --out FILE to export the rest`] } : {}),
+        ...(page.next ? { help: [`Run \`${rerun} --limit ${limit} --next ${page.next}${keepCap}\` for more, or \`${rerun} --all --out FILE --next ${page.next}${keepCap}\` to export the rest`] } : {}),
       };
     }
     const file = String(out);
@@ -671,7 +664,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       ...(result.next ? { next_token: result.next } : {}),
       est_cost: money(recorded),
       help: [
-        ...(result.stopped ? [...result.stopped.suggestions, result.next ? `The file holds what was read. Continue into a new file with --next ${result.next}` : "The file holds what was read"] : []),
+        ...(result.stopped ? [...result.stopped.suggestions, result.next ? `The file holds what was read. Continue into a new file with \`${rerun} --all --out NEW_FILE --next ${result.next}${keepCap}\`` : "The file holds what was read"] : []),
         "This export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan <handle> --out queue.json`",
       ],
     };

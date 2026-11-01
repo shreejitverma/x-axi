@@ -1,7 +1,7 @@
 import { AxiError } from "axi-sdk-js";
 import { closeSync, openSync, readSync, statSync } from "node:fs";
-import { basename, extname } from "node:path";
-import { displayText, usage } from "./args.js";
+import { basename, extname, resolve } from "node:path";
+import { displayText, shortenPath, usage } from "./args.js";
 
 /**
  * From https://docs.x.com/x-api/media/quickstart/media-upload-chunked and
@@ -105,7 +105,7 @@ export function chunkCount(size: number): number {
 
 /** The approval dialog and the dry-run output both name the file this way. */
 export function describeMedia(media: MediaFile): string {
-  return `${displayText(media.name).slice(0, 80)} (${media.mediaType}, ${mb(media.size)})`;
+  return `${shortenPath(displayText(resolve(media.path)))} (${media.mediaType}, ${mb(media.size)})`;
 }
 
 /** Yields one reused buffer, so a consumer must copy what it keeps. Refuses a file that changed after approval. */

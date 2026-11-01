@@ -1,6 +1,6 @@
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
 import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
@@ -336,6 +336,39 @@ describe("post --media", () => {
     expect(out).toMatchObject({ post: { id: "60", status: "published" } });
   });
 
+  it("tells apart files with the same name in different directories, in the dialog and the dry run", async () => {
+    mkdirSync(join(dir, "public"));
+    mkdirSync(join(dir, "private"));
+    const shown = await Promise.all(["public", "private"].map(async (folder) => {
+      const path = file(join(folder, "photo.png"), PNG_HEADER, 100);
+      const h = harness(mediaApi());
+      await h.commands["post"]!(["hi", "--media", path]);
+      const dry = await h.commands["post"]!(["hi", "--media", path, "--dry-run"]);
+      expect(String((dry["dry_run"] as Json)["media"])).toContain(path);
+      expect(h.calls.find((c) => c.path.endsWith("/append"))!.body).toBeInstanceOf(FormData);
+      expect(((h.calls.find((c) => c.path.endsWith("/append"))!.body as FormData).get("media") as File).name).toBe("photo.png");
+      return formatApproval(h.requests[0]!);
+    }));
+    expect(shown[0]).toContain(join(dir, "public", "photo.png"));
+    expect(shown[1]).toContain(join(dir, "private", "photo.png"));
+  });
+
+  it("shows where a relative path points, and keeps both ends of a very long one", async () => {
+    const path = file("photo.png", PNG_HEADER, 100);
+    const h = harness(mediaApi());
+    await h.commands["post"]!(["hi", "--media", relative(process.cwd(), path)]);
+    expect(formatApproval(h.requests[0]!)).toContain(path);
+
+    const deep = join(dir, "a".repeat(200));
+    mkdirSync(deep);
+    const long = harness(mediaApi());
+    await long.commands["post"]!(["hi", "--media", file(join("a".repeat(200), "b".repeat(100) + "-end.png"), PNG_HEADER, 100)]);
+    const shown = formatApproval(long.requests[0]!);
+    expect(shown).toContain("-end.png (image/png");
+    expect(shown).toContain(dir.slice(0, 20));
+    expect(shown).toContain("characters in full");
+  });
+
   it("shows the file name, type, and size in the dialog", async () => {
     const path = file("photo.png", PNG_HEADER, 2_400_000);
     const h = harness(mediaApi());
@@ -629,6 +662,46 @@ describe("following and followers", () => {
     const h = harness(lists({ "2": bob(manyUsers(2)) }));
     await h.commands["followers"]!(["bob", "--all", "--out", out]);
     expect(statSync(out).mode & 0o777).toBe(0o600);
+  });
+
+  const runPrinted = (command: string, accounts: Parameters<typeof lists>[0]) => {
+    const [name, ...args] = command.replace(/^x-axi /, "").split(" ");
+    return harness(lists(accounts)).commands[name!]!(args);
+  };
+  const printedCommands = (result: Json): string[] => [...(result["help"] as string[]).join(" ").matchAll(/`([^`]+)`/g)].map((m) => m[1]!);
+
+  it("prints continuations that read the next rows, keeping the cap the read needed", async () => {
+    const accounts = { "2": bob(manyUsers(5000)) };
+    const first = await harness(lists(accounts)).commands["following"]!(["bob", "--limit", "500", "--max-spend", "5.01"]);
+    const [more] = printedCommands(first);
+    const next = await runPrinted(more!, accounts);
+    expect(next).toMatchObject({ count: 500, next_token: "token1000" });
+    expect((next["users"] as Json[])[0]).toMatchObject({ id: "1500" });
+  });
+
+  it("prints an --all continuation that exports only the rest", async () => {
+    const accounts = { "2": bob(manyUsers(30)) };
+    const first = await harness(lists(accounts)).commands["following"]!(["bob", "--limit", "5"]);
+    const [, rest] = printedCommands(first);
+    const out = join(dir, "rest.json");
+    await expect(runPrinted(rest!.replace("FILE", out), accounts)).resolves.toMatchObject({ export: { written: 25, complete: true } });
+    expect((JSON.parse(readFileSync(out, "utf8")) as Json[])[0]).toMatchObject({ id: "1005" });
+  });
+
+  it("omits --max-spend from a continuation when the read did not need one", async () => {
+    const first = await harness(lists({ "2": bob(manyUsers(30)) })).commands["following"]!(["bob", "--limit", "5"]);
+    expect(printedCommands(first)[0]).toBe("x-axi following bob --limit 5 --next token5");
+  });
+
+  it("--all prints a continuation that finishes a stopped export under the same cap", async () => {
+    const accounts = { "2": bob(manyUsers(1500)) };
+    const list = lists(accounts);
+    const first = harness((c) => (c.path.includes("pagination_token") ? ok({ reset_at: "later" }, 429) : list(c)));
+    const result = await first.commands["following"]!(["bob", "--all", "--out", join(dir, "first.json"), "--max-spend", "20"]);
+    const continuation = printedCommands(result).find((c) => c.includes("--next"));
+    const out = join(dir, "second.json");
+    await expect(runPrinted(continuation!.replace("NEW_FILE", out), accounts)).resolves.toMatchObject({ export: { written: 500, complete: true } });
+    expect((JSON.parse(readFileSync(out, "utf8")) as Json[])[0]).toMatchObject({ id: "2000" });
   });
 
   it("cuts a page short at the cap when X's count is too low", async () => {

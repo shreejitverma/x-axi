@@ -141,6 +141,16 @@ export function displayText(value: string): string {
     .join("");
 }
 
+const MAX_SHOWN_PATH = 120;
+
+/** Keeps both ends of a path, because the name of the file and where it sits are what identify it. */
+export function shortenPath(path: string): string {
+  const characters = Array.from(path);
+  if (characters.length <= MAX_SHOWN_PATH) return path;
+  const end = MAX_SHOWN_PATH / 2;
+  return `${characters.slice(0, end).join("")} ...[${characters.length} characters in full]... ${characters.slice(-end).join("")}`;
+}
+
 export function onePositional(parsed: Parsed, command: string): string | undefined {
   if (parsed.positional.length > 1) {
     throw usage(`\`${command}\` takes one argument; quote it if it contains spaces`);
