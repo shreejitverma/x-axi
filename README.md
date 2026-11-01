@@ -88,8 +88,8 @@ It sends nothing to X and asks for no approval, because it only reads.
 - The two lookups that give the totals cost about $0.02, and the output and any refusal state the cost.
 - Above $1 it refuses without a `--max-spend <usd>` that covers the estimate, before reading either list.
 - Protected accounts go to `queue.protected.json` rather than the queue, unless you pass `--include-protected`.
-- A partial read of your own list writes no queue, because such a queue could hold accounts you already follow.
-- If X lists fewer of your follows than its own count, the output carries a warning.
+- A read of either list that stops early writes no queue, and neither do partial errors on your own list, because such a queue could hold accounts you already follow.
+- If X lists fewer of your follows than its own count, or reports partial errors on the other account's list, the queue is still written and the output carries a warning.
 
 The queue is correct when it is built.
 Follows you make elsewhere afterwards are not in it, and `follow-file` skips only accounts this login followed through x-axi.
@@ -226,10 +226,11 @@ On Linux:
 - The dialog holds about 25 lines of 50 columns.
   That is a conservative estimate rather than a measurement of the window, and macOS does not apply it.
 - A word or URL wider than a line is split in the dialog with a `↵` mark at each break, and the dialog counts the breaks; the text sent to X is unchanged.
-- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or a file path, is cut to fit with a marker giving its full character count, and never blocks the write.
+- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or the path of a `follow-file` queue, is cut to fit with a marker giving its full character count, and never blocks the write.
 - Text to send must be shown in full to be approved, so text too long to fit once wrapped returns `APPROVAL_TEXT_TOO_LONG` instead of a dialog.
   The text itself has room for about 19 rows, or about 950 characters of plain text, because the rest of the dialog is held for its other lines and any context.
   The rows of a split URL count toward that limit.
+  A `--media` path is shown in the dialog's first lines, so it takes from that room: about 17 rows are left with a short path, and about 13 with a 120-character path.
 - A `zenity` that cannot open its display exits with the same code as Cancel, so x-axi reads its error output and returns `APPROVAL_UNAVAILABLE` rather than reporting a cancel nobody made.
 - The gate is weaker than on macOS.
   Any process running as you can click in an X11 dialog, or set `DISPLAY` to an X server it controls and click there.

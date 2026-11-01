@@ -25,7 +25,7 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
   Nothing was sent, and there is no terminal prompt or override, so tell the user what the error says to install or where to run it.
 - `APPROVAL_TEXT_TOO_LONG` means the text to send is too long to fit once wrapped in the Linux dialog, which has room for about 19 rows of 50 columns of text, or about 950 characters of plain text, so nothing was sent; offer the user a shorter version.
   Parent posts and other context never cause it, and a URL wider than one row is split only for display and sent unchanged.
-  A `thread` counts all its parts and their labels together.
+  A `thread` counts all its parts and their labels together, and a `--media` path takes some of those rows.
 - `--dry-run` on any write prints the exact requests and cost with no dialog and no write.
   Reads needed to validate it are still billed.
   If its output has `dry_run.linux_dialog`, the real run on Linux refuses the text with `APPROVAL_TEXT_TOO_LONG`, so on Linux offer the user a shorter version first.

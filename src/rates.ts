@@ -19,7 +19,7 @@ export const RATES = {
   userInteraction: 0.015,
 } as const;
 
-/** A list read estimated above this refuses to start without an explicit --max-spend. */
+/** The cap without --max-spend: a list read estimated above it refuses to start, and an `--all --next` read, which cannot be estimated, stops at it. */
 export const DEFAULT_SPEND_CAP_USD = 1;
 
 const URL_LIKE = /https?:\/\/|\b[a-z0-9-]+\.[a-z]{2,}\b/i;
