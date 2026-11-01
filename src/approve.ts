@@ -1,12 +1,14 @@
 import { execFile } from "node:child_process";
 
-export interface ApprovalRequest {
+/** `text` is exactly what X will publish or deliver. `content` describes the target of any other write. */
+export type ApprovalBody = { text: string } | { content: string };
+
+export type ApprovalRequest = ApprovalBody & {
   action: string;
   account: string;
-  content: string;
   context?: string;
   estCostUsd: number | null;
-}
+};
 
 export type ApprovalResult = "approved" | "cancelled" | "timed_out" | "unavailable";
 
@@ -21,13 +23,19 @@ const SCRIPT = `on run argv
   return button returned of answer
 end run`;
 
-export const CONTEXT_LABEL = "context from X, not sent";
+function counted(count: number, noun: string): string {
+  return `${count} ${noun}${count === 1 ? "" : "s"}`;
+}
 
 export function formatApproval(request: ApprovalRequest): string {
   const cost = request.estCostUsd === null ? "unknown" : `about $${request.estCostUsd.toFixed(3)}`;
-  // The content comes first and context last, flattened, so text from X cannot pose as it.
-  const lines = [`${request.action} as @${request.account} (${cost})`, "", request.content];
-  if (request.context) lines.push("", `----- ${CONTEXT_LABEL} -----`, request.context);
+  // The tool writes the counts, so outgoing text cannot pass part of itself off as not sent.
+  const body = "text" in request
+    ? [`Text to send, all of it (${counted(Array.from(request.text).length, "character")}, ${counted(request.text.split("\n").length, "line")}):`, request.text]
+    : [request.content];
+  // The body comes first and context last, flattened, so text from X cannot pose as it.
+  const lines = [`${request.action} as @${request.account} (${cost})`, "", ...body];
+  if (request.context) lines.push("", "----- context from X, not sent -----", request.context);
   return lines.join("\n");
 }
 

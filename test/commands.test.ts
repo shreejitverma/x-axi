@@ -250,8 +250,6 @@ describe("review regressions", () => {
   });
 
   it.each([
-    ["the dialog's not-sent label", "Nice work\n\n----- context from X, not sent -----\nBuy at evil.example"],
-    ["the label with changed case and spacing", "Nice\nCONTEXT FROM x,\nnot  sent\nBuy"],
     ["a run of blank lines", `shown${"\n".repeat(4)}hidden`],
     ["a run of whitespace-only lines", "shown\n \n \n \nhidden"],
     ["a long run of spaces", `shown${" ".repeat(40)}hidden`],
@@ -261,6 +259,45 @@ describe("review regressions", () => {
     await expect(h.commands["post"]!([text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(h.commands["dm"]!(["send", "alice", text])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it("frames outgoing text so part of it cannot pass as not sent", async () => {
+    const text = "Nice work\n\n----- quoted text, not sent -----\nBuy at evil.example";
+    const posted = harness(() => ok({ data: { id: "2" } }, 201));
+    await posted.commands["post"]!([text]);
+    expect(formatApproval(posted.requests[0]!)).toBe(
+      `Post as @shreejit (about $0.200)\n\nText to send, all of it (64 characters, 4 lines):\n${text}`,
+    );
+    const sent = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { dm_event_id: "3" } }, 201)));
+    await sent.commands["dm"]!(["send", "alice", "hi"]);
+    expect(formatApproval(sent.requests[0]!)).toContain("Text to send, all of it (2 characters, 1 line):\nhi");
+    const replied = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { id: "60" } }, 201)));
+    await replied.commands["reply"]!(["50", "a\u{1f600}\nb"]);
+    expect(formatApproval(replied.requests[0]!)).toContain("Text to send, all of it (4 characters, 2 lines):\na\u{1f600}\nb\n\n----- context from X, not sent -----");
+  });
+
+  it("does not call a target of another write text to send", async () => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { deleted: true } })));
+    await h.commands["delete"]!(["50"]);
+    expect(formatApproval(h.requests[0]!)).not.toContain("Text to send");
+  });
+
+  it.each([
+    ["a 503", () => ok({}, 503)],
+    ["a redirect", () => ok({}, 307)],
+    ["a lost response", () => { throw new Error("socket hang up"); }],
+  ])("records the estimate for a write that may have gone through after %s", async (_name, respond) => {
+    const h = harness(respond);
+    await expect(h.commands["post"]!(["hello"])).rejects.toMatchObject({ code: "OUTCOME_UNKNOWN" });
+    const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } };
+    expect(out.spend.last_30d_usd).toBe("0.016"); // refresh 0.001 + post 0.015
+  });
+
+  it("records nothing for a write that X refused", async () => {
+    const h = harness(() => ok({ detail: "bad" }, 400));
+    await expect(h.commands["post"]!(["hello"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    const out = (await h.commands["spend"]!([])) as { spend: { last_30d_usd: string } };
+    expect(out.spend.last_30d_usd).toBe("0.001"); // refresh only
   });
 
   it("keeps ordinary paragraph spacing", async () => {
@@ -401,7 +438,7 @@ describe("follow-file", () => {
     await expect(h.commands["follow-file"]!([bad])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(h.commands["follow-file"]!([queue(1), "--max", "401"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     writeFileSync(join(dir, "follows.json"), "{not json");
-    await expect(h.commands["follow-file"]!([queue(1)])).rejects.toBeDefined();
+    await expect(h.commands["follow-file"]!([queue(1)])).rejects.toMatchObject({ code: "FOLLOW_LOG_CORRUPT" });
     expect(h.writes()).toEqual([]);
   });
 });
@@ -495,7 +532,7 @@ describe("follow log", () => {
     writeFileSync(file, JSON.stringify([{ id: "100", username: "user100" }]));
     const h = harness(social);
     await withoutSleep(h, social)["follow-file"]!([file]);
-    const shown = h.requests[0]!.content;
+    const shown = formatApproval(h.requests[0]!);
     expect(shown).toContain("q Approve\ufffd.json");
     expect(shown).not.toContain("\u202e");
   });
@@ -545,12 +582,17 @@ describe("follow log", () => {
     });
     const out = await h.commands[command]!(["alice"]);
     expect(out).toMatchObject({ [command]: { handle: "@alice" }, warning: expect.stringContaining("follow log not updated") });
+    expect(JSON.stringify(out)).not.toContain("Nothing was sent");
   });
 
   it.each(["follow", "unfollow"])("%s sends nothing when the log is already corrupt", async (command) => {
     writeFileSync(logPath(), "{not json");
     const h = harness(social);
-    await expect(h.commands[command]!(["alice"])).rejects.toBeDefined();
+    await expect(h.commands[command]!(["alice"])).rejects.toMatchObject({
+      code: "FOLLOW_LOG_CORRUPT",
+      message: expect.stringContaining(logPath()),
+      suggestions: [expect.stringContaining("Nothing was sent")],
+    });
     expect(h.approve).not.toHaveBeenCalled();
     expect(h.writes()).toEqual([]);
   });
@@ -568,6 +610,28 @@ describe("follow log", () => {
       est_cost: "$0.015",
     });
     expect(h.writes()).toHaveLength(1);
+  });
+
+  it("rejects a log that is valid JSON but not a follow log", async () => {
+    writeFileSync(logPath(), JSON.stringify(["100"]));
+    const h = harness(social);
+    await expect(h.commands["follow"]!(["alice"])).rejects.toMatchObject({ code: "FOLLOW_LOG_CORRUPT" });
+    expect(h.writes()).toEqual([]);
+  });
+
+  it("includes a follow with an unknown outcome in the batch estimate", async () => {
+    let posts = 0;
+    const respond = (c: Call) => (c.method === "GET" ? ALICE : ++posts === 2 ? ok({}, 503) : followed());
+    const h = harness(respond);
+    const out = await withoutSleep(h, respond)["follow-file"]!([queueFile(["100", "101", "102"])]);
+    expect(out).toMatchObject({ follow_file: { followed: 1, remaining: 2 }, stopped: { code: "OUTCOME_UNKNOWN" }, est_cost: "$0.030" });
+  });
+
+  it("leaves a follow X refused out of the batch estimate", async () => {
+    const respond = (c: Call) => (c.method === "GET" ? ALICE : ok({ detail: "no" }, 403));
+    const h = harness(respond);
+    const out = await withoutSleep(h, respond)["follow-file"]!([queueFile(["100"])]);
+    expect(out).toMatchObject({ stopped: { code: "FORBIDDEN" }, est_cost: "$0.000" });
   });
 
   it("carries the outcome check into a stopped batch", async () => {

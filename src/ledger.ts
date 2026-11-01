@@ -1,3 +1,4 @@
+import { AxiError } from "axi-sdk-js";
 import { appendFileSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -125,17 +126,24 @@ function migrateFollowLog(owner: Account): void {
   saveFollowFile({ version: 2, accounts: { [owner.id]: { following, events: Object.values(following) } } });
 }
 
+/** Callers after a confirmed write report only the message, so the help can speak for the checks made before sending. */
+function followLogError(path: string, reason: string): AxiError {
+  return new AxiError(`the follow log at ${path} is unusable: ${reason}`, "FOLLOW_LOG_CORRUPT", [
+    "Nothing was sent. Repair or restore that file; it holds the resume state and the 24-hour follow count",
+  ]);
+}
+
+// A corrupt log must stop a batch, or the daily cap would silently reset.
 function loadFollowFile(): FollowFile {
-  let raw: string;
+  const path = join(stateDir(), "follows.json");
+  let file: FollowFile | null;
   try {
-    raw = readFileSync(join(stateDir(), "follows.json"), "utf8");
+    file = JSON.parse(readFileSync(path, "utf8")) as FollowFile | null;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return { version: 2, accounts: {} };
-    throw error;
+    throw followLogError(path, (error as Error).message);
   }
-  // A corrupt log must stop a batch, or the daily cap would silently reset.
-  const file = JSON.parse(raw) as FollowFile | null;
-  if (file?.version !== 2 || !file.accounts) throw new Error("follows.json is not a version 2 follow log");
+  if (file?.version !== 2 || !file.accounts) throw followLogError(path, "it is not a version 2 follow log");
   return file;
 }
 

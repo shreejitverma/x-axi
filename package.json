@@ -8,8 +8,7 @@
   "bin": { "x-axi": "./dist/bin/x-axi.js" },
   "scripts": {
     "build": "tsc",
-    "test": "vitest run",
-    "dev": "tsx bin/x-axi.ts"
+    "test": "vitest run"
   },
   "license": "MIT",
   "engines": { "node": ">=20" },
@@ -19,7 +18,6 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
-    "tsx": "^4.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   }

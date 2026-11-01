@@ -58,6 +58,28 @@ it("refuses to send the token to a non-loopback override", async () => {
   expect(out).toContain("loopback");
 });
 
+it.each([[["update"]], [["update", "--check"]]])("%j points at git and never touches a package manager", async (args) => {
+  const marker = join(dir, "npm-ran");
+  for (const tool of ["npm", "pnpm"]) {
+    writeFileSync(join(dir, tool), `#!/bin/sh\ntouch "${marker}"\n`);
+    chmodSync(join(dir, tool), 0o755);
+  }
+  const before = seen.length;
+  const { out, code } = await run(args, { PATH: `${dir}:${process.env["PATH"]}` });
+  expect(code).toBe(1);
+  expect(out).toContain("UPDATE_FROM_GIT");
+  expect(out).toContain("git pull");
+  expect(out).not.toContain("x-axi@latest");
+  expect(existsSync(marker)).toBe(false);
+  expect(seen.length).toBe(before);
+});
+
+it("does not advertise a registry upgrade in help", async () => {
+  const { out, code } = await run(["--help"]);
+  expect(code).toBe(0);
+  expect(out).not.toContain("latest published version");
+});
+
 it("exits 2 on bad usage and does not call the API", async () => {
   const before = seen.length;
   const { code } = await run(["post", "--bogus"]);

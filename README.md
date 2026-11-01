@@ -10,6 +10,9 @@ go install github.com/xdevplatform/xurl@v1.3.4
 cd ~/github/x-axi && pnpm install --frozen-lockfile && pnpm run build && npm link
 ```
 
+To update, run `git pull && pnpm install --frozen-lockfile && pnpm run build` in the checkout.
+`x-axi update` only prints this, because the `x-axi` name on npm does not belong to this project.
+
 ## Connect your account
 
 Run `x-axi setup` and follow the steps in your own terminal, not through an agent.
@@ -24,7 +27,8 @@ Run `x-axi setup` and follow the steps in your own terminal, not through an agen
 
 ## Safety model
 
-Every write opens a native macOS dialog showing the account, exact text, parent post, and estimated cost.
+Every write opens a native macOS dialog showing the account, parent post, and estimated cost.
+Outgoing text appears in full under a tool-written header with its exact character and line counts, so all of those lines are sent, whatever they say about themselves.
 The gate lives in the tool, so it applies under every harness and permission mode, including unattended runs.
 It fails closed: Cancel, a 120-second timeout, or a missing dialog sends nothing.
 Writes are never retried, because a retry after a lost response could publish twice.
@@ -57,6 +61,7 @@ Checked against the [changelog](https://docs.x.com/changelog) and [pricing](http
 
 Each result shows `est_cost`, and `x-axi spend` totals them locally.
 These are upper bounds, because X does not re-bill a resource within a UTC day and may change its rates.
+A write with an unknown outcome is counted, because it may have been billed.
 The console is the billing truth, and its spend limit is the only hard cap.
 
 ## Test

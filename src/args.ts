@@ -1,5 +1,4 @@
 import { AxiError } from "axi-sdk-js";
-import { CONTEXT_LABEL } from "./approve.js";
 
 export interface Parsed {
   positional: string[];
@@ -80,9 +79,6 @@ export function parseOutgoingText(value: string | undefined): string {
     throw usage(`the text is over ${MAX_APPROVABLE} characters or ${MAX_APPROVABLE_LINES} lines, too long to review in the approval dialog`);
   }
   if (HIDING_GAP.test(value)) throw usage("the text has a long run of blank lines or spaces; shorten it");
-  if (value.replace(/\s+/g, " ").toLowerCase().includes(CONTEXT_LABEL.toLowerCase())) {
-    throw usage(`the text must not contain "${CONTEXT_LABEL}", which the approval dialog uses to mark text that is not sent`);
-  }
   return value;
 }
 

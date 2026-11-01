@@ -1,6 +1,6 @@
 import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
-import type { ApprovalResult, Approver } from "./approve.js";
+import type { ApprovalBody, ApprovalResult, Approver } from "./approve.js";
 import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseOutgoingText, parsePostId, usage } from "./args.js";
 import { readFileSync } from "node:fs";
 import { assertFollowLogReadable, DAY_MS, logFollow, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
@@ -124,6 +124,7 @@ export const HELP: Record<string, string> = {
   spend: "usage: x-axi spend\nLocal upper-bound estimate of API spend. No API call.",
   api: "usage: x-axi api </2/path?query>\nRaw GET for read endpoints without a command. Spend is not estimated. Writes are not available here.",
   setup: "usage: x-axi setup\nShows login state and steps. No API call.",
+  update: "usage: x-axi update\nShows how to update from your git checkout. It installs nothing.",
 };
 
 export const SETUP_STEPS = [
@@ -243,14 +244,14 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   const gate = async (
     action: string,
     account: Account,
-    content: string,
+    body: ApprovalBody,
     estCostUsd: number | null,
     context?: string,
   ): Promise<void> => {
     const result: ApprovalResult = await deps.approve({
       action,
       account: account.username,
-      content,
+      ...body,
       estCostUsd,
       ...(context ? { context } : {}),
     });
@@ -279,9 +280,11 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       response = await deps.client.request(method, path, body);
     } catch (error) {
       if (error instanceof AxiError) throw error;
+      spend(op, usd);
       throw outcomeUnknown(String(error), check);
     }
     if (response.status >= 500 || (response.status >= 300 && response.status < 400)) {
+      spend(op, usd);
       throw outcomeUnknown(`X returned ${response.status}`, check);
     }
     if (response.status >= 400) throw toApiError(response, errorContext);
@@ -293,7 +296,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const usd = estimatePostCost(text, replyTo !== undefined);
     const op = replyTo ? "reply" : "post";
     const check = "Check with `x-axi timeline`";
-    await gate(replyTo ? "Reply" : "Post", account, text, usd, context);
+    await gate(replyTo ? "Reply" : "Post", account, { text }, usd, context);
     const response = await send(
       "POST",
       "/2/tweets",
@@ -318,7 +321,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const account = await refreshAccount();
     const found = await fetchPost(id);
     if (!found) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
-    await gate(hidden ? "Hide reply" : "Unhide reply", account, `@${found.author}: ${displayText(fullText(found.post))}`, null);
+    await gate(hidden ? "Hide reply" : "Unhide reply", account, { content: `@${found.author}: ${displayText(fullText(found.post))}` }, null);
     const check = `Check the reply at https://x.com/i/status/${id}, because x-axi cannot read whether a reply is hidden`;
     const response = await send("PUT", `/2/tweets/${id}/hidden`, { hidden }, name, null, check);
     const state = (response.body["data"] as Json | undefined)?.["hidden"];
@@ -392,7 +395,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         if (parsed.positional.length > 2) throw usage("quote the message text as one argument");
         const account = await refreshAccount();
         const target = await resolveUser(handle);
-        await gate(`DM to @${target.username}`, account, text, RATES.dmCreate);
+        await gate(`DM to @${target.username}`, account, { text }, RATES.dmCreate);
         const check = `Check with \`x-axi dm read ${target.username}\``;
         const response = await send("POST", `/2/dm_conversations/with/${target.id}/messages`, { text }, "dm_send", RATES.dmCreate, check);
         const data = response.body["data"] as Json | undefined;
@@ -444,7 +447,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const account = await refreshAccount();
       const found = await fetchPost(id);
       if (!found) return { post: { id, status: "already gone (no-op)" } };
-      await gate("Delete post", account, displayText(fullText(found.post)), RATES.interactionDelete);
+      await gate("Delete post", account, { content: displayText(fullText(found.post)) }, RATES.interactionDelete);
       const check = `Check with \`x-axi view ${id}\``;
       const response = await send("DELETE", `/2/tweets/${id}`, undefined, "delete", RATES.interactionDelete, check);
       if ((response.body["data"] as Json | undefined)?.["deleted"] !== true) {
@@ -456,9 +459,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const parsed = parseArgs(args, "follow", []);
       const handle = parseHandle(onePositional(parsed, "follow"));
       const account = await refreshAccount();
-      const target = await resolveUser(handle);
       assertFollowLogReadable();
-      await gate("Follow", account, `@${target.username}`, RATES.userInteraction);
+      const target = await resolveUser(handle);
+      await gate("Follow", account, { content: `@${target.username}` }, RATES.userInteraction);
       const check = checkProfile(target.username);
       const response = await send("POST", `/2/users/${account.id}/following`, { target_user_id: target.id }, "follow", RATES.userInteraction, check);
       const data = response.body["data"] as Json | undefined;
@@ -470,9 +473,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const parsed = parseArgs(args, "unfollow", []);
       const handle = parseHandle(onePositional(parsed, "unfollow"));
       const account = await refreshAccount();
-      const target = await resolveUser(handle);
       assertFollowLogReadable();
-      await gate("Unfollow", account, `@${target.username}`, RATES.interactionDelete);
+      const target = await resolveUser(handle);
+      await gate("Unfollow", account, { content: `@${target.username}` }, RATES.interactionDelete);
       const check = checkProfile(target.username);
       const response = await send("DELETE", `/2/users/${account.id}/following/${target.id}`, undefined, "unfollow", RATES.interactionDelete, check);
       if ((response.body["data"] as Json | undefined)?.["following"] !== false) throw outcomeUnknown("X did not confirm the unfollow", check);
@@ -502,7 +505,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const names = batch.slice(0, 10).map((u) => `@${u.username}`).join(", ");
       const more = batch.length > 10 ? `, and ${batch.length - 10} more` : "";
       const provenance = `Usernames come from ${displayText(file)} and were not verified with X.`;
-      await gate(`Follow ${batch.length} accounts over about ${Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000)} minutes`, account, `${names}${more}\n\n${provenance}`, usd);
+      await gate(`Follow ${batch.length} accounts over about ${Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000)} minutes`, account, { content: `${names}${more}\n\n${provenance}` }, usd);
       const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
       let followed = 0;
       let requested = 0;
@@ -532,6 +535,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         }
       }
       const done = followed + requested;
+      const billable = done + (stopped?.["code"] === "OUTCOME_UNKNOWN" ? 1 : 0);
       const left = remaining.length - done;
       const again = `Run \`x-axi follow-file ${file}\``;
       const stillRecent = recentFollows(recent);
@@ -542,7 +546,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       return {
         follow_file: { followed, requested, remaining: left, status: stopped ? "stopped early" : "batch complete" },
         ...(stopped ? { stopped } : {}),
-        est_cost: money(done * RATES.userInteraction),
+        est_cost: money(billable * RATES.userInteraction),
         ...(help.length ? { help } : {}),
       };
     },
@@ -562,6 +566,11 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       }
       spend("api", null);
       return response.body;
+    },
+    update: () => {
+      throw new AxiError("x-axi is not published to a package registry and does not update itself", "UPDATE_FROM_GIT", [
+        "In your x-axi checkout, run `git pull && pnpm install --frozen-lockfile && pnpm run build`",
+      ]);
     },
     setup: (args) => {
       parseArgs(args, "setup", []);
