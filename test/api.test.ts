@@ -1,3 +1,5 @@
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { afterEach, expect, it, vi } from "vitest";
 import { createHttpClient } from "../src/api.js";
 
@@ -45,6 +47,35 @@ it("never puts a malformed token in a header, and never echoes it", async () => 
   expect(JSON.stringify(error)).not.toContain("SECRET_TOKEN_VALUE");
   expect(error.message).not.toContain("SECRET_TOKEN_VALUE");
   expect(fetchStub).not.toHaveBeenCalled();
+});
+
+it("sends a FormData body as real multipart over loopback, with the bytes intact and no JSON content type", async () => {
+  let contentType: string | undefined;
+  let received = Buffer.alloc(0);
+  const server = createServer((req, res) => {
+    contentType = req.headers["content-type"];
+    const parts: Buffer[] = [];
+    req.on("data", (part: Buffer) => parts.push(part));
+    req.on("end", () => {
+      received = Buffer.concat(parts);
+      res.end('{"data":{"expires_at":1}}');
+    });
+  });
+  await new Promise<void>((done) => server.listen(0, "127.0.0.1", done));
+  try {
+    vi.stubEnv("X_AXI_API_BASE", `http://127.0.0.1:${(server.address() as AddressInfo).port}`);
+    const form = new FormData();
+    form.append("segment_index", "3");
+    form.append("media", new Blob([Buffer.from([0, 255, 13, 10, 7])]), "clip.mp4");
+    const response = await createHttpClient(async () => "unused").request("POST", "/2/media/upload/777/append", form);
+    expect(response).toEqual({ status: 200, body: { data: { expires_at: 1 } } });
+    expect(contentType).toMatch(/^multipart\/form-data; boundary=/);
+    expect(received.toString("latin1")).toContain('name="segment_index"\r\n\r\n3\r\n');
+    expect(received.toString("latin1")).toContain('name="media"; filename="clip.mp4"');
+    expect(received.includes(Buffer.from([0, 255, 13, 10, 7]))).toBe(true);
+  } finally {
+    server.close();
+  }
 });
 
 it("reports a network failure by name, without the request", async () => {

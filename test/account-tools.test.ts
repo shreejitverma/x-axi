@@ -1,0 +1,723 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
+import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
+import type { AuthService } from "../src/auth.js";
+import { buildCommands } from "../src/commands.js";
+
+type Call = { method: Method; path: string; body?: Json | FormData };
+const ok = (body: Json, status = 200): ApiResponse => ({ status, body });
+const PARENT = ok({ data: { id: "50", text: "parent text", author_id: "9" }, includes: { users: [{ id: "9", username: "alice" }] } });
+
+function harness(handler: (call: Call) => ApiResponse | Promise<ApiResponse>, approval: ApprovalResult = "approved", scopes = ["tweet.write", "media.write"]) {
+  const calls: Call[] = [];
+  const events: string[] = [];
+  const client: XClient = {
+    request: async (method, path, body) => {
+      const call: Call = { method, path, ...(body ? { body } : {}) };
+      calls.push(call);
+      events.push(`${method} ${path}`);
+      if (path === "/2/users/me") return ok({ data: { id: "1", username: "shreejit" } });
+      return handler(call);
+    },
+  };
+  const requests: ApprovalRequest[] = [];
+  const approve = vi.fn(async (request: ApprovalRequest) => {
+    requests.push(request);
+    events.push("approval");
+    return approval;
+  });
+  const auth: AuthService = {
+    accessToken: async () => "fake",
+    login: () => Promise.reject(new Error("unused")),
+    logout: () => Promise.reject(new Error("unused")),
+    status: async () => ({ logged_in: true, storage: "fake", scopes }),
+  };
+  const sleeps: number[] = [];
+  const sleep = async (ms: number) => {
+    sleeps.push(ms);
+  };
+  return {
+    commands: buildCommands({ client, approve, auth, sleep }),
+    calls,
+    events,
+    requests,
+    approve,
+    sleeps,
+    writes: () => calls.filter((c) => c.method !== "GET"),
+    reads: () => calls.filter((c) => c.method === "GET"),
+  };
+}
+
+let dir: string;
+beforeEach(() => {
+  dir = mkdtempSync(join(tmpdir(), "x-axi-tools-"));
+  process.env["X_AXI_STATE_DIR"] = dir;
+  process.env["XDG_CONFIG_HOME"] = join(dir, "config");
+});
+afterEach(() => {
+  delete process.env["X_AXI_STATE_DIR"];
+  delete process.env["XDG_CONFIG_HOME"];
+  rmSync(dir, { recursive: true, force: true });
+});
+
+const PNG_HEADER = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+const MP4_HEADER = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from("ftypmp42")]);
+
+function file(name: string, header: Buffer, size: number): string {
+  const path = join(dir, name);
+  const bytes = Buffer.alloc(size);
+  // Position-dependent bytes, so a misordered or overlapping chunk changes the result.
+  for (let i = 0; i < size; i += 1) bytes[i] = i % 251;
+  header.copy(bytes);
+  writeFileSync(path, bytes);
+  return path;
+}
+
+/** A fake of the documented upload flow, finishing with no processing step unless told otherwise. */
+function mediaApi(finalize: Json = { id: "777" }, overrides: (call: Call) => ApiResponse | undefined = () => undefined) {
+  return (call: Call): ApiResponse => {
+    const special = overrides(call);
+    if (special) return special;
+    if (call.path === "/2/media/upload/initialize") return ok({ data: { id: "777", expires_after_secs: 86400 } });
+    if (call.path === "/2/media/upload/777/append") return ok({ data: { expires_at: 1 } });
+    if (call.path === "/2/media/upload/777/finalize") return ok({ data: finalize });
+    if (call.path === "/2/tweets") return ok({ data: { id: "60" } }, 201);
+    if (call.method === "GET") return PARENT;
+    return ok({}, 500);
+  };
+}
+
+const EVERY_WRITE: [string, string[]][] = [
+  ["post", ["post", "hello"]],
+  ["post --quote", ["post", "hello", "--quote", "50"]],
+  ["reply", ["reply", "50", "hello"]],
+  ["thread", ["thread", "one", "two"]],
+  ["delete", ["delete", "50"]],
+  ["hide", ["hide", "50"]],
+  ["unhide", ["unhide", "50"]],
+  ["repost", ["repost", "50"]],
+  ["unrepost", ["unrepost", "50"]],
+  ["follow", ["follow", "alice"]],
+  ["unfollow", ["unfollow", "alice"]],
+  ["dm send", ["dm", "send", "alice", "hi"]],
+];
+
+function lookupOrParent(call: Call): ApiResponse {
+  return call.path.startsWith("/2/users/by/username/") ? ok({ data: { id: "9", username: "alice" } }) : PARENT;
+}
+
+describe("the new writes need approval", () => {
+  for (const result of ["cancelled", "timed_out", "unavailable"] as const) {
+    it.each([
+      ["thread", () => ["thread", "one", "two"]],
+      ["post --quote", () => ["post", "hello", "--quote", "50"]],
+      ["post --media", () => ["post", "hello", "--media", file("a.png", PNG_HEADER, 100)]],
+      ["reply --media", () => ["reply", "50", "hello", "--media", file("a.png", PNG_HEADER, 100)]],
+      ["repost", () => ["repost", "50"]],
+      ["unrepost", () => ["unrepost", "50"]],
+    ])(`%s sends nothing when approval is ${result}`, async (_name, argv) => {
+      const h = harness(lookupOrParent, result);
+      const [command, ...args] = argv();
+      await expect(h.commands[command!]!(args)).rejects.toMatchObject({ code: result === "unavailable" ? "APPROVAL_UNAVAILABLE" : "NOT_APPROVED" });
+      expect(h.approve).toHaveBeenCalledTimes(1);
+      expect(h.writes()).toEqual([]);
+    });
+  }
+});
+
+describe("--dry-run", () => {
+  it.each(EVERY_WRITE)("%s writes nothing, asks nothing, and says reads are billed", async (_name, [command, ...args]) => {
+    const h = harness(lookupOrParent);
+    const out = (await h.commands[command!]!([...args, "--dry-run"])) as { dry_run: { would_send: unknown[]; write_est_cost: string }; est_cost: string; help: string[] };
+    expect(h.writes()).toEqual([]);
+    expect(h.approve).not.toHaveBeenCalled();
+    expect(out.dry_run.would_send.length).toBeGreaterThan(0);
+    expect(out.dry_run.write_est_cost).toBeDefined();
+    // Every path here validates with at least the account read, which is billed.
+    expect(Number(out.est_cost.slice(1))).toBeGreaterThan(0);
+    expect(out.help.join(" ")).toContain("bills");
+  });
+
+  it("shows the exact request a post would send, and its cost", async () => {
+    const h = harness(() => ok({}));
+    const out = (await h.commands["post"]!(["see https://example.com", "--dry-run"])) as { dry_run: { would_send: unknown[]; write_est_cost: string } };
+    expect(out.dry_run.would_send).toEqual([{ method: "POST", path: "/2/tweets", body: { text: "see https://example.com" } }]);
+    expect(out.dry_run.write_est_cost).toBe("$0.200");
+  });
+
+  it("still validates: bad text fails before any read", async () => {
+    const h = harness(() => ok({}));
+    await expect(h.commands["post"]!(["safe‮text", "--dry-run"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("follow-file names the batch and sends nothing", async () => {
+    const queue = join(dir, "q.json");
+    writeFileSync(queue, JSON.stringify([{ id: "9", username: "alice" }, { id: "10", username: "bob" }]));
+    const h = harness(() => ok({}));
+    const out = (await h.commands["follow-file"]!([queue, "--max", "1", "--dry-run"])) as { dry_run: { batch: unknown[]; remaining_after: number; write_est_cost: string } };
+    expect(out.dry_run.batch).toEqual([{ id: "9", username: "alice" }]);
+    expect(out.dry_run.remaining_after).toBe(1);
+    expect(out.dry_run.write_est_cost).toBe("$0.015");
+    expect(h.writes()).toEqual([]);
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it("media is inspected and reported, and not one byte is uploaded", async () => {
+    const path = file("clip.mp4", MP4_HEADER, 5_000_001);
+    const h = harness(() => ok({}));
+    const out = (await h.commands["post"]!(["hi", "--media", path, "--dry-run"])) as { dry_run: { media: string; would_send: Json[] } };
+    expect(out.dry_run.media).toContain("clip.mp4 (video/mp4, 5.0 MB)");
+    expect(out.dry_run.would_send[0]).toMatchObject({ path: "/2/media/upload/initialize", body: { media_type: "video/mp4", total_bytes: 5_000_001, media_category: "tweet_video" } });
+    expect(out.dry_run.would_send[1]).toMatchObject({ chunks: 2 });
+    expect(h.writes()).toEqual([]);
+  });
+
+  it("a post that is already gone stays a no-op", async () => {
+    const h = harness(() => ok({ errors: [{ title: "Not Found Error" }] }));
+    await expect(h.commands["delete"]!(["50", "--dry-run"])).resolves.toMatchObject({ post: { status: "already gone (no-op)" } });
+  });
+});
+
+describe("thread", () => {
+  let next: number;
+  beforeEach(() => {
+    next = 100;
+  });
+  const posting = (fail?: (index: number) => ApiResponse | Error | undefined) => {
+    let index = 0;
+    return (): ApiResponse => {
+      const failure = fail?.(index);
+      index += 1;
+      if (failure instanceof Error) throw failure;
+      if (failure) return failure;
+      next += 1;
+      return ok({ data: { id: String(next) } }, 201);
+    };
+  };
+
+  it("asks once, shows every part and the total, and chains each reply to the part before", async () => {
+    const h = harness(posting());
+    const out = await h.commands["thread"]!(["first", "second", "third"]);
+    expect(h.approve).toHaveBeenCalledTimes(1);
+    const shown = formatApproval(h.requests[0]!);
+    for (const part of ["first", "second", "third"]) expect(shown).toContain(part);
+    expect(h.requests[0]!.estCostUsd).toBeCloseTo(0.045);
+    expect(h.writes().map((c) => c.body)).toEqual([
+      { text: "first" },
+      { text: "second", reply: { in_reply_to_tweet_id: "101" } },
+      { text: "third", reply: { in_reply_to_tweet_id: "102" } },
+    ]);
+    expect(out).toMatchObject({ thread: { status: "published", total: 3 }, est_cost: "$0.045" });
+  });
+
+  it("prices each part through the URL rule", async () => {
+    const h = harness(posting());
+    await h.commands["thread"]!(["plain", "see https://example.com"]);
+    expect(h.requests[0]!.estCostUsd).toBeCloseTo(0.215);
+  });
+
+  it("stops at a refused part, reports what posted and that this one did not, and never retries", async () => {
+    const h = harness(posting((i) => (i === 1 ? ok({ detail: "You are not allowed" }, 403) : undefined)));
+    const out = (await h.commands["thread"]!(["first", "second", "third"])) as Record<string, Json>;
+    expect(h.writes()).toHaveLength(2);
+    expect(out["thread"]).toMatchObject({ status: "stopped early", posted: [{ part: 1, id: "101" }], total: 3 });
+    expect(out["stopped"]).toMatchObject({ part: 2, outcome: "not posted", code: "FORBIDDEN", not_attempted: 1 });
+    expect(out["est_cost"]).toBe("$0.015");
+  });
+
+  it.each([
+    ["a dropped connection", () => new Error("socket hang up")],
+    ["a 5xx", () => ok({ title: "Service Unavailable" }, 503)],
+    ["a 2xx without an ID", () => ok({}, 201)],
+  ])("reports the outcome of the part as unknown after %s, and bills it", async (_name, failure) => {
+    const h = harness(posting((i) => (i === 1 ? failure() : undefined)));
+    const out = (await h.commands["thread"]!(["first", "second", "third"])) as Record<string, Json>;
+    expect(h.writes()).toHaveLength(2);
+    expect(out["stopped"]).toMatchObject({ part: 2, code: "OUTCOME_UNKNOWN" });
+    expect(String((out["stopped"] as Json)["outcome"])).toContain("unknown");
+    expect(out["est_cost"]).toBe("$0.030");
+  });
+
+  it("fails as an ordinary error when the first part fails, since nothing is public", async () => {
+    const h = harness(posting(() => ok({ detail: "You are not allowed" }, 403)));
+    await expect(h.commands["thread"]!(["first", "second"])).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(h.writes()).toHaveLength(1);
+  });
+
+  it("refuses one part, an invalid part, and a thread too long to review, before any call", async () => {
+    const h = harness(posting());
+    await expect(h.commands["thread"]!(["only"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["thread"]!(["ok", "bad‮part"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["thread"]!(Array.from({ length: 21 }, (_, i) => `part ${i}`))).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+  });
+});
+
+describe("post --quote", () => {
+  it("shows the quoted post and sends quote_tweet_id", async () => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { id: "60" } }, 201)));
+    await h.commands["post"]!(["my take", "--quote", "https://x.com/alice/status/50"]);
+    expect(formatApproval(h.requests[0]!)).toContain("Quoting @alice: parent text");
+    expect(h.requests[0]!.estCostUsd).toBe(0.015);
+    expect(h.writes()[0]!.body).toEqual({ text: "my take", quote_tweet_id: "50" });
+  });
+
+  it("names the Enterprise requirement when X refuses", async () => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok({ detail: "not permitted" }, 403)));
+    const error = await h.commands["post"]!(["my take", "--quote", "50"]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe("FORBIDDEN");
+    expect(error.suggestions.join(" ")).toContain("Enterprise");
+  });
+
+  it("refuses a missing post before the dialog", async () => {
+    const h = harness(() => ok({ errors: [{ title: "Not Found Error" }] }));
+    await expect(h.commands["post"]!(["my take", "--quote", "50"])).rejects.toMatchObject({ code: "NOT_FOUND" });
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+});
+
+describe("post --media", () => {
+  const appends = (calls: Call[]) => calls.filter((c) => c.path.endsWith("/append"));
+
+  it.each([
+    ["one byte under a chunk", 4_999_999, [4_999_999]],
+    ["exactly one chunk", 5_000_000, [5_000_000]],
+    ["one byte over one chunk", 5_000_001, [5_000_000, 1]],
+    ["exactly two chunks", 10_000_000, [5_000_000, 5_000_000]],
+    ["exactly three chunks", 15_000_000, [5_000_000, 5_000_000, 5_000_000]],
+  ])("splits %s", async (_name, size, expected) => {
+    const path = file("clip.mp4", MP4_HEADER, size);
+    const h = harness(mediaApi());
+    await h.commands["post"]!(["hi", "--media", path]);
+    const forms = appends(h.calls).map((c) => c.body as FormData);
+    expect(forms.map((f) => (f.get("media") as File).size)).toEqual(expected);
+    expect(forms.map((f) => f.get("segment_index"))).toEqual(expected.map((_, i) => String(i)));
+    const rebuilt = Buffer.concat(await Promise.all(forms.map(async (f) => Buffer.from(await (f.get("media") as File).arrayBuffer()))));
+    expect(rebuilt.equals(readFileSync(path))).toBe(true);
+  });
+
+  it("runs the documented sequence, after approval and in order, and attaches the ID", async () => {
+    const path = file("photo.png", PNG_HEADER, 1000);
+    const h = harness(mediaApi());
+    const out = await h.commands["post"]!(["hi", "--media", path]);
+    expect(h.events).toEqual([
+      "GET /2/users/me",
+      "approval",
+      "POST /2/media/upload/initialize",
+      "POST /2/media/upload/777/append",
+      "POST /2/media/upload/777/finalize",
+      "POST /2/tweets",
+    ]);
+    expect(h.calls.find((c) => c.path.endsWith("initialize"))!.body).toEqual({ media_type: "image/png", total_bytes: 1000, media_category: "tweet_image" });
+    expect(h.writes().at(-1)!.body).toEqual({ text: "hi", media: { media_ids: ["777"] } });
+    expect(out).toMatchObject({ post: { id: "60", status: "published" } });
+  });
+
+  it("shows the file name, type, and size in the dialog", async () => {
+    const path = file("photo.png", PNG_HEADER, 2_400_000);
+    const h = harness(mediaApi());
+    await h.commands["post"]!(["hi", "--media", path]);
+    const shown = formatApproval(h.requests[0]!);
+    expect(shown).toContain("photo.png");
+    expect(shown).toContain("image/png");
+    expect(shown).toContain("2.4 MB");
+  });
+
+  it("uses the GIF category for a GIF, and may post media with no text", async () => {
+    const path = file("loop.gif", Buffer.from("GIF89a"), 6_000_000);
+    const h = harness(mediaApi());
+    await h.commands["post"]!(["--media", path]);
+    expect(h.calls.find((c) => c.path.endsWith("initialize"))!.body).toMatchObject({ media_type: "image/gif", media_category: "tweet_gif" });
+    expect(h.writes().at(-1)!.body).toEqual({ media: { media_ids: ["777"] } });
+  });
+
+  it("works on a reply", async () => {
+    const path = file("photo.png", PNG_HEADER, 100);
+    const h = harness(mediaApi());
+    await h.commands["reply"]!(["50", "hi", "--media", path]);
+    expect(h.writes().at(-1)!.body).toEqual({ text: "hi", reply: { in_reply_to_tweet_id: "50" }, media: { media_ids: ["777"] } });
+  });
+
+  it.each([
+    ["an image over 5 MiB", () => file("big.png", PNG_HEADER, 5 * 1024 * 1024 + 1)],
+    ["a GIF over 15 MiB", () => file("big.gif", Buffer.from("GIF89a"), 15 * 1024 * 1024 + 1)],
+    ["an unknown type", () => file("notes.png", Buffer.from("hello world"), 100)],
+    ["a renamed file", () => file("clip.png", MP4_HEADER, 100)],
+    ["an empty file", () => file("none.png", Buffer.alloc(0), 0)],
+    ["a missing file", () => join(dir, "missing.png")],
+    ["a directory", () => dir],
+  ])("refuses %s before any spend or dialog", async (_name, path) => {
+    const h = harness(mediaApi());
+    await expect(h.commands["post"]!(["hi", "--media", path()])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it("accepts an image at exactly the limit", async () => {
+    const path = file("edge.png", PNG_HEADER, 5 * 1024 * 1024);
+    const h = harness(mediaApi());
+    await expect(h.commands["post"]!(["hi", "--media", path])).resolves.toMatchObject({ post: { id: "60" } });
+  });
+
+  it("refuses a login without media.write before any spend or dialog, and says how to fix it", async () => {
+    const path = file("photo.png", PNG_HEADER, 100);
+    const h = harness(mediaApi(), "approved", ["tweet.write"]);
+    const error = await h.commands["post"]!(["hi", "--media", path]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe("MISSING_SCOPE");
+    expect(error.suggestions.join(" ")).toContain("x-axi login");
+    expect(h.calls).toEqual([]);
+  });
+
+  it("refuses two --media flags rather than dropping one", async () => {
+    const h = harness(mediaApi());
+    await expect(h.commands["post"]!(["hi", "--media", "a.png", "--media", "b.png"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("polls status while processing, waiting as long as X asks, then posts", async () => {
+    const path = file("clip.mp4", MP4_HEADER, 100);
+    const states = [{ state: "in_progress", check_after_secs: 7 }, { state: "succeeded" }];
+    const h = harness(mediaApi({ id: "777", processing_info: { state: "pending", check_after_secs: 3 } }, (c) =>
+      c.method === "GET" && c.path.startsWith("/2/media/upload") ? ok({ data: { id: "777", processing_info: states.shift() } }) : undefined,
+    ));
+    await h.commands["post"]!(["hi", "--media", path]);
+    expect(h.sleeps).toEqual([3000, 7000]);
+    expect(h.reads().map((c) => c.path).filter((p) => p.startsWith("/2/media"))).toEqual(Array(2).fill("/2/media/upload?command=STATUS&media_id=777"));
+    expect(h.writes().at(-1)!.path).toBe("/2/tweets");
+  });
+
+  it("posts nothing when processing fails", async () => {
+    const path = file("clip.mp4", MP4_HEADER, 100);
+    const h = harness(mediaApi({ id: "777", processing_info: { state: "failed" } }));
+    await expect(h.commands["post"]!(["hi", "--media", path])).rejects.toMatchObject({ code: "MEDIA_FAILED", message: expect.stringContaining("nothing was posted") });
+    expect(h.writes().map((c) => c.path)).not.toContain("/2/tweets");
+  });
+
+  it("gives up on endless processing, and posts nothing", async () => {
+    const path = file("clip.mp4", MP4_HEADER, 100);
+    const pending = { state: "in_progress", check_after_secs: 60 };
+    const h = harness(mediaApi({ id: "777", processing_info: pending }, (c) => (c.method === "GET" && c.path.startsWith("/2/media/upload") ? ok({ data: { id: "777", processing_info: pending } }) : undefined)));
+    await expect(h.commands["post"]!(["hi", "--media", path])).rejects.toMatchObject({ code: "MEDIA_TIMEOUT" });
+    expect(h.sleeps).toHaveLength(10);
+    expect(h.writes().map((c) => c.path)).not.toContain("/2/tweets");
+  });
+
+  it("stops at a failed chunk, never retries it, and says nothing was posted", async () => {
+    const path = file("clip.mp4", MP4_HEADER, 10_000_000);
+    let chunks = 0;
+    const h = harness(mediaApi({ id: "777" }, (c) => {
+      if (!c.path.endsWith("/append")) return undefined;
+      chunks += 1;
+      if (chunks === 2) throw new Error("socket hang up");
+      return undefined;
+    }));
+    await expect(h.commands["post"]!(["hi", "--media", path])).rejects.toMatchObject({ code: "MEDIA_UPLOAD_FAILED", message: expect.stringContaining("nothing was posted") });
+    expect(chunks).toBe(2);
+    expect(h.writes().map((c) => c.path)).not.toContain("/2/tweets");
+  });
+
+  it("refuses a file that changed after the dialog", async () => {
+    const path = file("photo.png", PNG_HEADER, 100);
+    const h = harness(mediaApi());
+    h.approve.mockImplementationOnce(async () => {
+      writeFileSync(path, Buffer.concat([PNG_HEADER, Buffer.alloc(500)]));
+      return "approved";
+    });
+    await expect(h.commands["post"]!(["hi", "--media", path])).rejects.toMatchObject({ message: expect.stringContaining("changed after") });
+    expect(h.writes().map((c) => c.path)).not.toContain("/2/tweets");
+  });
+
+  it("explains a post refused after the upload", async () => {
+    const path = file("clip.mp4", MP4_HEADER, 100);
+    const h = harness(mediaApi({ id: "777" }, (c) => (c.path === "/2/tweets" ? ok({ detail: "video too long" }, 403) : undefined)));
+    const error = await h.commands["post"]!(["hi", "--media", path]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe("FORBIDDEN");
+    expect(error.suggestions.join(" ")).toContain("Media 777");
+  });
+
+  it("records upload calls as unpriced in the ledger", async () => {
+    const path = file("photo.png", PNG_HEADER, 100);
+    const h = harness(mediaApi());
+    await h.commands["post"]!(["hi", "--media", path]);
+    const ledger = readFileSync(join(dir, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { op: string; usd: number | null });
+    expect(ledger.filter((e) => e.op === "media_upload").map((e) => e.usd)).toEqual([null, null, null]);
+    expect(ledger.find((e) => e.op === "post")!.usd).toBe(0.015);
+  });
+});
+
+describe("repost and unrepost", () => {
+  it("reposts with the documented request, showing the post", async () => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { rest_id: "50", retweeted: true } })));
+    await expect(h.commands["repost"]!(["50"])).resolves.toMatchObject({ post: { id: "50", status: "reposted" } });
+    expect(formatApproval(h.requests[0]!)).toContain("@alice: parent text");
+    expect(h.requests[0]!.estCostUsd).toBeNull();
+    expect(h.writes()[0]).toEqual({ method: "POST", path: "/2/users/1/retweets", body: { tweet_id: "50" } });
+  });
+
+  it("unreposts with the documented request", async () => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { retweeted: false } })));
+    await expect(h.commands["unrepost"]!(["50"])).resolves.toMatchObject({ post: { status: "not reposted" } });
+    expect(h.writes()[0]).toEqual({ method: "DELETE", path: "/2/users/1/retweets/50" });
+  });
+
+  it("reports an unknown outcome when X does not confirm", async () => {
+    const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { retweeted: false } })));
+    await expect(h.commands["repost"]!(["50"])).rejects.toMatchObject({ code: "OUTCOME_UNKNOWN" });
+  });
+});
+
+describe("following and followers", () => {
+  const user = (id: number, extra: Json = {}): Json => ({ id: String(id), username: `user${id}`, name: `User ${id}`, ...extra });
+
+  /** A fake list that honours max_results and pagination_token, as a real one would. */
+  const lists = (accounts: Record<string, { counts?: Json; following?: Json[]; followers?: Json[] }>) => {
+    const pages = (rows: Json[], query: URLSearchParams): ApiResponse => {
+      const size = Number(query.get("max_results"));
+      const start = Number(query.get("pagination_token")?.replace("token", "") ?? 0);
+      const data = rows.slice(start, start + size);
+      const next = start + size < rows.length ? `token${start + size}` : undefined;
+      return ok({ ...(data.length ? { data } : {}), meta: { result_count: data.length, ...(next ? { next_token: next } : {}) } });
+    };
+    return (call: Call): ApiResponse => {
+      const url = new URL(call.path, "http://x");
+      const me = url.pathname === "/2/users/me";
+      const byName = url.pathname.match(/^\/2\/users\/by\/username\/(\w+)$/)?.[1];
+      if (me || byName) {
+        const key = me ? "1" : Object.keys(accounts).find((id) => accounts[id]!.counts?.["username"] === byName);
+        const account = key ? accounts[key] : undefined;
+        if (!account) return ok({ errors: [{ title: "Not Found Error" }] });
+        const { username, ...metrics } = account.counts ?? {};
+        return ok({ data: { id: key, username: username ?? "shreejit", public_metrics: metrics } });
+      }
+      const list = url.pathname.match(/^\/2\/users\/(\d+)\/(following|followers)$/);
+      if (list) return pages(accounts[list[1]!]![list[2] as "following" | "followers"] ?? [], url.searchParams);
+      throw new Error(`unexpected ${call.path}`);
+    };
+  };
+  const bob = (rows: Json[], extra: Json = {}) => ({ counts: { username: "bob", following_count: rows.length, followers_count: rows.length, ...extra }, following: rows, followers: rows });
+  const manyUsers = (count: number, from = 1000) => Array.from({ length: count }, (_, i) => user(from + i));
+
+  it("shows the total and a page, at the list rate plus the lookup", async () => {
+    const h = harness(lists({ "2": bob(manyUsers(30)) }));
+    const out = await h.commands["following"]!(["bob", "--limit", "5"]);
+    expect(out).toMatchObject({ target: "@bob", total: 30, count: 5, next_token: "token5", est_cost: "$0.060" });
+    expect((out["users"] as Json[])[0]).toEqual({ id: "1000", username: "user1000", name: "User 1000", protected: false });
+    expect(h.reads().at(-1)!.path).toContain("max_results=5");
+    expect(h.reads().at(-1)!.path).toContain("user.fields=protected");
+    expect(h.approve).not.toHaveBeenCalled();
+  });
+
+  it("uses the follower count and endpoint for followers, and continues from --next", async () => {
+    const h = harness(lists({ "2": bob(manyUsers(30)) }));
+    await h.commands["followers"]!(["bob", "--limit", "5", "--next", "token5"]);
+    expect(h.reads().at(-1)!.path).toContain("/2/users/2/followers");
+    expect(h.reads().at(-1)!.path).toContain("pagination_token=token5");
+  });
+
+  it("reads your own list at the owned rate without a handle", async () => {
+    const h = harness(lists({ "1": { counts: { following_count: 3 }, following: manyUsers(3) } }));
+    await expect(h.commands["following"]!([])).resolves.toMatchObject({ target: "@shreejit", total: 3, count: 3, est_cost: "$0.013" });
+  });
+
+  it("states an empty list definitively", async () => {
+    const h = harness(lists({ "2": bob([]) }));
+    await expect(h.commands["following"]!(["bob"])).resolves.toMatchObject({ total: 0, users: "0 accounts found" });
+  });
+
+  it("refuses a large page before reading it, showing the total and cost", async () => {
+    const h = harness(lists({ "2": bob(manyUsers(5000)) }));
+    const error = await h.commands["following"]!(["bob", "--limit", "500"]).catch((e: { code: string; message: string; suggestions: string[] }) => e) as { code: string; message: string; suggestions: string[] };
+    expect(error.code).toBe("SPEND_CAP");
+    expect(error.message).toContain("500 of the 5000");
+    expect(error.message).toContain("$5.010");
+    expect(error.suggestions.join(" ")).toContain("--max-spend 5.01");
+    expect(h.reads().filter((c) => c.path.includes("/following"))).toEqual([]);
+  });
+
+  it("allows that page with a cap that covers it", async () => {
+    const h = harness(lists({ "2": bob(manyUsers(5000)) }));
+    await expect(h.commands["following"]!(["bob", "--limit", "500", "--max-spend", "5.01"])).resolves.toMatchObject({ count: 500 });
+  });
+
+  it.each([["--max-spend", "0"], ["--max-spend", "-1"], ["--max-spend", "lots"], ["--limit", "1001"], ["--limit", "0"]])("refuses %s %s before any call", async (flag, value) => {
+    const h = harness(lists({}));
+    await expect(h.commands["following"]!(["bob", flag, value])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("--all exports every page to a file follow-file can read", async () => {
+    const out = join(dir, "export.json");
+    const h = harness(lists({ "2": bob(manyUsers(2500)) }));
+    const result = await h.commands["following"]!(["bob", "--all", "--out", out, "--max-spend", "26"]);
+    expect(result).toMatchObject({ export: { written: 2500, complete: true, total: 2500 }, est_cost: "$25.010" });
+    expect(h.reads().filter((c) => c.path.includes("/following"))).toHaveLength(3);
+    const rows = JSON.parse(readFileSync(out, "utf8")) as Json[];
+    expect(rows).toHaveLength(2500);
+    const dry = await h.commands["follow-file"]!([out, "--dry-run", "--max", "1"]);
+    expect(dry).toMatchObject({ dry_run: { batch: [{ id: "1000", username: "user1000" }] } });
+  });
+
+  it("--all refuses up front when the total exceeds the cap, reading no page and writing no file", async () => {
+    const out = join(dir, "export.json");
+    const h = harness(lists({ "2": bob(manyUsers(2000)) }));
+    await expect(h.commands["following"]!(["bob", "--all", "--out", out])).rejects.toMatchObject({ code: "SPEND_CAP" });
+    await expect(h.commands["following"]!(["bob", "--all", "--out", out, "--max-spend", "2"])).rejects.toMatchObject({ code: "SPEND_CAP" });
+    expect(h.reads().filter((c) => c.path.includes("/following"))).toEqual([]);
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it("--all cannot run past the cap even when X's count is far too low", async () => {
+    const out = join(dir, "export.json");
+    const h = harness(lists({ "2": { counts: { username: "bob", following_count: 10 }, following: manyUsers(5000) } }));
+    const result = await h.commands["following"]!(["bob", "--all", "--out", out, "--max-spend", "1.01"]);
+    expect(result).toMatchObject({ export: { written: 100, complete: false }, stopped: { code: "SPEND_CAP" }, next_token: "token100", est_cost: "$1.010" });
+    expect(JSON.parse(readFileSync(out, "utf8"))).toHaveLength(100);
+  });
+
+  it("--all keeps what it paid for when a later page fails, and says where to continue", async () => {
+    const out = join(dir, "export.json");
+    const list = lists({ "2": bob(manyUsers(1500)) });
+    const h = harness((c) => (c.path.includes("pagination_token") ? ok({ reset_at: "later" }, 429) : list(c)));
+    const result = await h.commands["following"]!(["bob", "--all", "--out", out, "--max-spend", "20"]);
+    expect(result).toMatchObject({ export: { written: 1000, complete: false }, stopped: { code: "RATE_LIMITED" }, next_token: "token1000" });
+    expect(JSON.parse(readFileSync(out, "utf8"))).toHaveLength(1000);
+  });
+
+  it("--all fails as an error with no file when the first page fails", async () => {
+    const out = join(dir, "export.json");
+    const list = lists({ "2": bob(manyUsers(5)) });
+    const h = harness((c) => (c.path.includes("/following") ? ok({ detail: "not allowed" }, 403) : list(c)));
+    await expect(h.commands["following"]!(["bob", "--all", "--out", out])).rejects.toMatchObject({ code: "FORBIDDEN" });
+    expect(existsSync(out)).toBe(false);
+  });
+
+  it("--all and --out go together, and an existing file is never overwritten", async () => {
+    const out = join(dir, "export.json");
+    writeFileSync(out, "precious");
+    const h = harness(lists({ "2": bob(manyUsers(5)) }));
+    await expect(h.commands["following"]!(["bob", "--all"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["following"]!(["bob", "--out", join(dir, "new.json")])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    await expect(h.commands["following"]!(["bob", "--all", "--out", out])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(readFileSync(out, "utf8")).toBe("precious");
+    expect(h.calls).toEqual([]);
+  });
+
+  describe("follow-plan", () => {
+    const plan = (mine: Json[], theirs: Json[]) => ({
+      "1": { counts: { following_count: mine.length }, following: mine },
+      "2": bob(theirs),
+    });
+
+    it("removes accounts you already follow and yourself, in the file format follow-file reads", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan([user(10), user(11)], [user(10), user(1, { username: "shreejit" }), user(12), user(11), user(13)])));
+      const result = await h.commands["follow-plan"]!(["bob", "--out", out]);
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual([{ id: "12", username: "user12" }, { id: "13", username: "user13" }]);
+      expect(result).toMatchObject({
+        follow_plan: { target: "@bob", target_following: 5, your_following: 2, already_followed: 2, self_excluded: 1, queued: 2, protected_held: 0 },
+        following_them_would_cost: "$0.030",
+      });
+      // Two lookups, 2 of your own at the owned rate, 5 of theirs at the list rate.
+      expect(result["est_cost"]).toBe("$0.072");
+      expect(h.approve).not.toHaveBeenCalled();
+      expect(h.writes()).toEqual([]);
+      await expect(h.commands["follow-file"]!([out, "--dry-run"])).resolves.toMatchObject({ dry_run: { batch: [{ id: "12" }, { id: "13" }] } });
+    });
+
+    it("reads each list once", async () => {
+      const h = harness(lists(plan([user(10)], [user(12)])));
+      await h.commands["follow-plan"]!(["bob", "--out", join(dir, "queue.json")]);
+      expect(h.reads().filter((c) => c.path.includes("/following")).map((c) => new URL(c.path, "http://x").pathname)).toEqual(["/2/users/1/following", "/2/users/2/following"]);
+    });
+
+    it("holds protected accounts in a separate list by default", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan([], [user(12), user(13, { protected: true })])));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out])).resolves.toMatchObject({ follow_plan: { queued: 1, protected_held: 1, protected_file: join(dir, "queue.protected.json") } });
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual([{ id: "12", username: "user12" }]);
+      expect(JSON.parse(readFileSync(join(dir, "queue.protected.json"), "utf8"))).toEqual([{ id: "13", username: "user13" }]);
+    });
+
+    it("queues protected accounts with --include-protected", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan([], [user(13, { protected: true })])));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out, "--include-protected"])).resolves.toMatchObject({ follow_plan: { queued: 1, protected_held: 0 } });
+      expect(existsSync(join(dir, "queue.protected.json"))).toBe(false);
+    });
+
+    it("refuses above the threshold without --max-spend, showing the cost, reading no list and writing no file", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan(manyUsers(100, 5000), manyUsers(200))));
+      const error = await h.commands["follow-plan"]!(["bob", "--out", out]).catch((e: { code: string; message: string; suggestions: string[] }) => e) as { code: string; message: string; suggestions: string[] };
+      expect(error.code).toBe("SPEND_CAP");
+      // $0.02 of lookups, 100 at $0.001, 200 at $0.01.
+      expect(error.message).toContain("$2.120");
+      expect(error.suggestions.join(" ")).toContain("--max-spend 2.12");
+      expect(h.reads().filter((c) => c.path.includes("/following"))).toEqual([]);
+      expect(existsSync(out)).toBe(false);
+    });
+
+    it("proceeds with a --max-spend that covers it", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan(manyUsers(100, 5000), manyUsers(200))));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "2.12"])).resolves.toMatchObject({ follow_plan: { queued: 200 } });
+    });
+
+    it("writes no queue if your own list cannot be read whole, because it could hold accounts you follow", async () => {
+      const out = join(dir, "queue.json");
+      const list = lists(plan(manyUsers(1500, 5000), [user(12)]));
+      const h = harness((c) => (c.path.includes("/2/users/1/following") && c.path.includes("pagination_token") ? ok({ detail: "boom" }, 503) : list(c)));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "5"])).rejects.toMatchObject({ message: expect.stringContaining("no queue was written") });
+      expect(existsSync(out)).toBe(false);
+    });
+
+    it("writes no queue when X reports partial errors on your own list", async () => {
+      const out = join(dir, "queue.json");
+      const list = lists(plan([user(10)], [user(12)]));
+      const h = harness((c) => (c.path.includes("/2/users/1/following") ? ok({ data: [user(10)], errors: [{ detail: "hidden" }], meta: { result_count: 1 } }) : list(c)));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out])).rejects.toMatchObject({ code: "INCOMPLETE_READ" });
+      expect(existsSync(out)).toBe(false);
+    });
+
+    it("writes no queue if the cap stops the read, however wrong X's counts were", async () => {
+      const out = join(dir, "queue.json");
+      const accounts = plan([], manyUsers(500));
+      accounts["2"]!.counts = { username: "bob", following_count: 5 };
+      const h = harness(lists(accounts));
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "1"])).rejects.toMatchObject({ code: "SPEND_CAP" });
+      expect(existsSync(out)).toBe(false);
+    });
+
+    it("warns when X lists fewer of your follows than its count", async () => {
+      const out = join(dir, "queue.json");
+      const accounts = plan([user(10)], [user(12)]);
+      accounts["1"]!.counts = { following_count: 2 };
+      const h = harness(lists(accounts));
+      const result = await h.commands["follow-plan"]!(["bob", "--out", out]);
+      expect(String(result["warning"])).toContain("1 of the 2");
+    });
+
+    it("refuses your own account, an existing queue, and a missing --out", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists({ ...plan([], []), "2": { counts: { username: "shreejit", following_count: 0 } } }));
+      await expect(h.commands["follow-plan"]!(["bob"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      writeFileSync(out, "precious");
+      await expect(h.commands["follow-plan"]!(["bob", "--out", out])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(readFileSync(out, "utf8")).toBe("precious");
+      expect(h.calls).toEqual([]);
+    });
+
+    it("states an empty plan definitively, and still writes the file", async () => {
+      const out = join(dir, "queue.json");
+      const h = harness(lists(plan([user(10)], [user(10)])));
+      const result = await h.commands["follow-plan"]!(["bob", "--out", out]);
+      expect(result).toMatchObject({ follow_plan: { queued: 0, already_followed: 1 } });
+      expect((result["help"] as string[])[0]).toContain("0 accounts to follow");
+      expect(JSON.parse(readFileSync(out, "utf8"))).toEqual([]);
+    });
+  });
+});

@@ -1,6 +1,6 @@
 // Runs the built binary against a loopback X API. The override uses a fixed test token and never touches the keystore.
 import { execFile } from "node:child_process";
-import { chmodSync, existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -20,6 +20,8 @@ beforeAll(async () => {
     res.setHeader("content-type", "application/json");
     if (req.url === "/2/users/me") res.end('{"data":{"id":"1","username":"shreejit"}}');
     else if (req.url?.startsWith("/2/users/1/mentions")) res.end('{"data":[{"id":"5","text":"@shreejit hi","author_id":"9"}],"includes":{"users":[{"id":"9","username":"alice"}]}}');
+    else if (req.url === "/2/users/me?user.fields=public_metrics") res.end('{"data":{"id":"1","username":"shreejit","public_metrics":{"following_count":2}}}');
+    else if (req.url?.startsWith("/2/users/1/following")) res.end('{"data":[{"id":"9","username":"alice","name":"Alice"},{"id":"10","username":"bob","name":"Bob","protected":true}],"meta":{"result_count":2}}');
     else if (req.url === "/2/redir") { res.statusCode = 307; res.setHeader("location", "/2/users/me"); res.end(); }
     else { res.statusCode = 500; res.end("{}"); }
   });
@@ -106,6 +108,36 @@ it("exits 2 on bad usage and does not call the API", async () => {
   const { code } = await run(["post", "--bogus"]);
   expect(code).toBe(2);
   expect(seen.length).toBe(before);
+});
+
+it("prints a dry run as TOON through the binary, opens no dialog, and sends no write", async () => {
+  const before = seen.length;
+  const { out, code } = await run(["thread", "first part", "second part", "--dry-run"]);
+  expect(code).toBe(0);
+  expect(out).toContain("dry_run:");
+  expect(out).toContain("first part");
+  expect(out).toContain("<id of part 1>");
+  expect(out).toContain("write_est_cost: $0.030");
+  expect(seen.slice(before).map((s) => s.method)).toEqual(["GET"]);
+});
+
+it("exports the following list through the binary and refuses to overwrite it", async () => {
+  const file = join(dir, "export.json");
+  const first = await run(["following", "--all", "--out", file]);
+  expect(first.code).toBe(0);
+  expect(first.out).toContain("written: 2");
+  expect(JSON.parse(readFileSync(file, "utf8"))).toHaveLength(2);
+  const second = await run(["following", "--all", "--out", file]);
+  expect(second.code).toBe(2);
+  expect(second.out).toContain("already exists");
+});
+
+it("documents the new commands in help", async () => {
+  const top = await run(["--help"]);
+  for (const name of ["following", "followers", "follow-plan", "thread", "repost", "--dry-run"]) expect(top.out).toContain(name);
+  for (const [command, flag] of [["post", "--media"], ["post", "--quote"], ["follow-plan", "--max-spend"], ["following", "--all"], ["delete", "--dry-run"]]) {
+    expect((await run([command as string, "--help"])).out).toContain(flag);
+  }
 });
 
 it("does not follow redirects, and reports them", async () => {
