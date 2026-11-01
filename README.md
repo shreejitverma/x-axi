@@ -32,7 +32,7 @@ After switching logins with xurl, run `x-axi me` to refresh it.
 
 Every write opens a native macOS dialog showing the account, parent post, and estimated cost.
 Outgoing text appears in full under a tool-written header with its exact character and line counts, so all of those lines are sent, whatever they say about themselves.
-Invisible characters are refused except where a language or emoji needs them: joiners in emoji and Arabic or Indic script text, tag characters in subdivision flags, and direction marks in right-to-left text.
+Invisible characters are refused except where a language or emoji needs them: zero-width joiners in emoji and Indic script text, zero-width non-joiners in Arabic and Indic script text, tag characters in subdivision flags, and direction marks in right-to-left text.
 Bidi embeddings, overrides, and isolates are always refused.
 The gate lives in the tool, so it applies under every harness and permission mode, including unattended runs.
 It fails closed: Cancel, a 120-second timeout, or a missing dialog sends nothing.
@@ -64,9 +64,10 @@ Checked against the [changelog](https://docs.x.com/changelog) and [pricing](http
 
 ## Cost
 
-Each result shows `est_cost`, and `x-axi spend` totals them locally.
+Each priced result shows `est_cost`, and `x-axi spend` totals them locally.
 A write's `est_cost` is the write alone; the lookups before its dialog appear only in `spend`.
 These are upper bounds, because X does not re-bill a resource within a UTC day and may change its rates.
+The `hide`, `unhide`, and `api` calls have no estimate, so they add nothing to these totals and `spend` counts them in `unpriced_calls_30d`.
 A write with an unknown outcome is counted, because it may have been billed.
 The console is the billing truth, and its spend limit is the only hard cap.
 
