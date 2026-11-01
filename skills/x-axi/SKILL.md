@@ -19,8 +19,11 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
 
 ## Rules
 
-- Every write opens a macOS approval dialog that only the user can answer.
+- Every write opens a native approval dialog that only the user can answer: on macOS, or on a Linux desktop through `zenity` or `kdialog`.
   If it returns `NOT_APPROVED`, nothing was sent; report that and do not retry unless asked.
+- `APPROVAL_UNAVAILABLE` means this machine cannot show the dialog, as in headless, SSH, or CI sessions, and `APPROVAL_UNSUPPORTED_PLATFORM` means Windows or another unsupported system.
+  Nothing was sent, and there is no terminal prompt or override, so tell the user what the error says to install or where to run it.
+- `APPROVAL_TEXT_TOO_LONG` means the Linux dialog could not show all of the action, counting any parent post, so nothing was sent; offer the user a shorter version.
 - `OUTCOME_UNKNOWN` means the write may have gone through.
   Do the check named in the error's help before any second attempt.
 - `REPLY_NOT_SUMMONED` means X refuses this reply through the API.

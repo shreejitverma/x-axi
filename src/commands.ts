@@ -301,13 +301,33 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       ...(context ? { context } : {}),
     });
     if (result === "approved") return;
-    const reasons: Record<Exclude<ApprovalResult, "approved">, [string, string]> = {
+    const reasons: Record<Exclude<ApprovalResult, "approved">, [string, string, string?]> = {
       cancelled: ["the user cancelled this action; nothing was sent", "NOT_APPROVED"],
       timed_out: ["nobody answered the approval dialog; nothing was sent", "NOT_APPROVED"],
       unavailable: ["no approval dialog is available on this machine; nothing was sent", "APPROVAL_UNAVAILABLE"],
+      no_graphical_session: [
+        "writes need a dialog on a graphical desktop, and this session has neither DISPLAY nor WAYLAND_DISPLAY; nothing was sent",
+        "APPROVAL_UNAVAILABLE",
+        "Run x-axi from a desktop session with zenity or kdialog installed; there is no terminal prompt or override",
+      ],
+      no_dialog_tool: [
+        "writes need zenity or kdialog, and neither is in /usr/bin, /bin, or /usr/local/bin; nothing was sent",
+        "APPROVAL_UNAVAILABLE",
+        "Ask the user to install zenity (or kdialog) from their distribution; there is no terminal prompt or override",
+      ],
+      unsupported_platform: [
+        `writes need a native approval dialog, which x-axi has only on macOS and Linux, not on ${process.platform}; nothing was sent`,
+        "APPROVAL_UNSUPPORTED_PLATFORM",
+        "Run writes on macOS or Linux; there is no terminal prompt or override",
+      ],
+      too_long: [
+        "this action is too long for the Linux approval dialog to show in full, counting any parent post or context; nothing was sent",
+        "APPROVAL_TEXT_TOO_LONG",
+        "Shorten the text, or break up any very long unbroken word or URL",
+      ],
     };
-    const [message, code] = reasons[result];
-    throw new AxiError(message, code, ["Do not retry unless the user asks; never call the X API another way to get around this"]);
+    const [message, code, advice] = reasons[result];
+    throw new AxiError(message, code, [...(advice ? [advice] : []), "Do not retry unless the user asks; never call the X API another way to get around this"]);
   };
 
   /** Writes are never retried: after a lost response, a retry could publish twice. */

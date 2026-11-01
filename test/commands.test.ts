@@ -90,6 +90,19 @@ describe("approval gate", () => {
     });
   }
 
+  it.each([
+    ["no_graphical_session", "APPROVAL_UNAVAILABLE", /zenity or kdialog/],
+    ["no_dialog_tool", "APPROVAL_UNAVAILABLE", /install zenity/],
+    ["unsupported_platform", "APPROVAL_UNSUPPORTED_PLATFORM", /macOS or Linux/],
+    ["too_long", "APPROVAL_TEXT_TOO_LONG", /Shorten the text/],
+  ] as const)("refuses with structured guidance when approval is %s", async (result, code, advice) => {
+    const h = harness(() => PARENT, result);
+    const error = await h.commands["post"]!(["hello"]).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code });
+    expect((error as { suggestions: string[] }).suggestions.join("\n")).toMatch(advice);
+    expect(h.writes()).toEqual([]);
+  });
+
   it("shows the exact text and the parent post before a reply", async () => {
     const h = harness((c) => (c.method === "GET" ? PARENT : ok({ data: { id: "60" } }, 201)));
     await h.commands["reply"]!(["https://x.com/alice/status/50?s=20", "my reply"]);
