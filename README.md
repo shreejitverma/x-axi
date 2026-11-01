@@ -154,9 +154,12 @@ On Linux:
 - The tool gets a short list of display and locale variables and nothing else, because variables such as `ZENITY_CANCEL=0` or `LD_PRELOAD` could turn a Cancel into an approval.
 - `kdialog` has no flag for the default button, so pressing Enter may approve; install `zenity` if you can.
 - `kdialog` has no plain text mode, so x-axi sends it escaped rich text, and it has no timeout flag, so x-axi kills it at the timeout.
-- Text that may not fit returns `APPROVAL_TEXT_TOO_LONG` instead of a dialog, because a clipped dialog would ask you to approve words you cannot see.
-  The limit is about 25 lines of 50 columns, with no unbroken word over 60 columns, counting any parent post.
-  It is a conservative estimate rather than a measurement of the window, and macOS does not apply it.
+- The dialog holds about 25 lines of 50 columns.
+  That is a conservative estimate rather than a measurement of the window, and macOS does not apply it.
+- A word or URL wider than a line is split in the dialog with a `↵` mark at each break, and the dialog counts the breaks; the text sent to X is unchanged.
+- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or a file path, is cut to fit with a marker giving its full character count, and never blocks the write.
+- Text to send must be shown in full to be approved, so text with too many lines returns `APPROVAL_TEXT_TOO_LONG` instead of a dialog.
+- A `zenity` that cannot open its display exits with the same code as Cancel, so x-axi reads its error output and returns `APPROVAL_UNAVAILABLE` rather than reporting a cancel nobody made.
 - The gate is weaker than on macOS.
   Any process running as you can click in an X11 dialog, or set `DISPLAY` to an X server it controls and click there.
 

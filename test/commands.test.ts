@@ -1,10 +1,10 @@
 import { AxiError } from "axi-sdk-js";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
-import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
+import { createApprover, formatApproval, isExecutableFile, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
 import { createAuth, type AuthService, type AuthStatus, type LogoutReport, type RevokeOutcome } from "../src/auth.js";
 import { buildCommands } from "../src/commands.js";
 import { readConfig } from "../src/config.js";
@@ -677,6 +677,97 @@ describe("review regressions", () => {
     await expect(h.commands["search"]!(["foo", "bar"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(h.commands["delete"]!(["50", "51"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     expect(h.calls).toEqual([]);
+  });
+});
+
+// The real Linux approver against a fake dialog tool: a dialog limit must not block a write the user cannot fix.
+describe.each(["zenity", "kdialog"])("Linux dialog limits with a fake %s", (tool) => {
+  const MARK = "\u21b5";
+  const LONG_RUN = "x".repeat(80);
+  const LONG_URL = `https://example.com/${"a".repeat(80)}`;
+  const post = (text: string) => ok({ data: { id: "50", text, author_id: "9" }, includes: { users: [{ id: "9", username: "alice" }] } });
+
+  function linux(handler: (call: Call) => ApiResponse) {
+    const bin = join(dir, "system-bin");
+    const argv = join(dir, "argv");
+    mkdirSync(bin);
+    writeFileSync(join(bin, tool), `#!/bin/sh\nfor a in "$@"; do last="$a"; done\nprintf '%s' "$last" > "${argv}"\nexit 0\n`);
+    chmodSync(join(bin, tool), 0o755);
+    const calls: Call[] = [];
+    const client: XClient = {
+      request: async (method, path, body) => {
+        const call = { method, path, ...(body ? { body } : {}) };
+        calls.push(call);
+        return path === "/2/users/me" ? ME : handler(call);
+      },
+    };
+    const approve = createApprover({ platform: "linux", env: { DISPLAY: ":0" }, isExecutable: isExecutableFile, directories: [bin] });
+    return {
+      commands: buildCommands({ client, approve, auth: fakeAuth(), sleep: async () => {} }),
+      writes: () => calls.filter((c) => c.method !== "GET"),
+      dialog: () => readFileSync(argv, "utf8"),
+      dialogOpened: () => existsSync(argv),
+    };
+  }
+
+  it("hides a reply containing a very long word", async () => {
+    const h = linux((c) => (c.method === "GET" ? post(LONG_RUN) : ok({ data: { hidden: true } })));
+    await expect(h.commands["hide"]!(["50"])).resolves.toMatchObject({ reply: { id: "50", hidden: true } });
+    expect(h.writes().map((c) => c.path)).toEqual(["/2/tweets/50/hidden"]);
+    expect(h.dialog()).toContain(MARK);
+  });
+
+  it("deletes a long post, showing how much of it was cut", async () => {
+    const h = linux((c) => (c.method === "GET" ? post("word ".repeat(400).trim()) : ok({ data: { deleted: true } })));
+    await expect(h.commands["delete"]!(["50"])).resolves.toMatchObject({ post: { status: "deleted" } });
+    expect(h.dialog()).toContain("[cut to fit: 1999 characters in full]");
+  });
+
+  it("replies to a parent with a very long word, whatever the reply says", async () => {
+    const h = linux((c) => (c.method === "GET" ? post(`${LONG_RUN} ${"word ".repeat(400)}`) : ok({ data: { id: "60" } }, 201)));
+    await expect(h.commands["reply"]!(["50", "my reply"])).resolves.toMatchObject({ reply: { id: "60" } });
+    expect(h.writes()[0]!.body).toEqual({ text: "my reply", reply: { in_reply_to_tweet_id: "50" } });
+    expect(h.dialog()).toContain(MARK);
+    expect(h.dialog()).toContain("my reply");
+    expect(h.dialog()).toContain("characters in full]");
+  });
+
+  it("posts a long URL unbroken, while the dialog marks where it split it", async () => {
+    const h = linux(() => ok({ data: { id: "60" } }, 201));
+    await expect(h.commands["post"]!([LONG_URL])).resolves.toMatchObject({ post: { id: "60" } });
+    expect(h.writes()[0]!.body).toEqual({ text: LONG_URL });
+    expect(h.dialog()).toContain(MARK);
+    expect(h.dialog()).toContain("splits long words at 2 marks");
+  });
+
+  it("sends a long URL by DM unbroken", async () => {
+    const h = linux((c) => (c.method === "GET" ? ok({ data: { id: "9", username: "alice" } }) : ok({ data: { dm_event_id: "70" } }, 201)));
+    await expect(h.commands["dm"]!(["send", "alice", LONG_URL])).resolves.toMatchObject({ dm: { status: "sent" } });
+    expect(h.writes()[0]!.body).toEqual({ text: LONG_URL });
+    expect(h.dialog()).toContain(MARK);
+  });
+
+  it("follows from a file with a long path, keeping both ends of the path in the dialog", async () => {
+    const nested = join(dir, "d".repeat(100), "e".repeat(100));
+    mkdirSync(nested, { recursive: true });
+    const file = join(nested, "queue.json");
+    writeFileSync(file, JSON.stringify([{ id: "100", username: "user100" }]));
+    const h = linux(() => ok({ data: { following: true, pending_follow: false } }));
+    await expect(h.commands["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { followed: 1 } });
+    const shown = h.dialog();
+    expect(shown).toContain(`[${Array.from(file).length} characters in full]`);
+    expect(shown).toContain("queue.json");
+    expect(shown).toContain(file.slice(0, 40));
+    expect(shown).toContain("not verified with X");
+  });
+
+  it("refuses outgoing text that cannot fit, sends nothing, and opens no dialog", async () => {
+    const h = linux(() => ok({ data: { id: "60" } }, 201));
+    const error = await h.commands["post"]!([Array(30).fill("line").join("\n")]).catch((e: unknown) => e);
+    expect(error).toMatchObject({ code: "APPROVAL_TEXT_TOO_LONG" });
+    expect((error as { suggestions: string[] }).suggestions.join("\n")).toMatch(/Shorten the text/);
+    expect(h.writes()).toEqual([]);
+    expect(h.dialogOpened()).toBe(false);
   });
 });
 

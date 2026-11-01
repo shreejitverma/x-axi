@@ -117,7 +117,8 @@ it("does not follow redirects, and reports them", async () => {
 });
 
 // These two run only on Linux, where the binary cannot reach osascript. No real dialog can open:
-// the first has no display, and any real zenity in the second fails on a display that does not exist.
+// the first has no display. In the second, any real zenity exits 1 on a display that does not exist, as Cancel does,
+// and x-axi reads its display error to report the machine as unavailable rather than a cancel nobody made.
 it.runIf(process.platform === "linux")("refuses a write in a headless session and says what to install", async () => {
   const { out, code } = await run(["post", "headless test, never sent"], { DISPLAY: "", WAYLAND_DISPLAY: "" });
   expect(code).toBe(1);

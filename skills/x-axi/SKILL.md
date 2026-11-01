@@ -23,7 +23,8 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
   If it returns `NOT_APPROVED`, nothing was sent; report that and do not retry unless asked.
 - `APPROVAL_UNAVAILABLE` means this machine cannot show the dialog, as in headless, SSH, or CI sessions, and `APPROVAL_UNSUPPORTED_PLATFORM` means Windows or another unsupported system.
   Nothing was sent, and there is no terminal prompt or override, so tell the user what the error says to install or where to run it.
-- `APPROVAL_TEXT_TOO_LONG` means the Linux dialog could not show all of the action, counting any parent post, so nothing was sent; offer the user a shorter version.
+- `APPROVAL_TEXT_TOO_LONG` means the text to send has too many lines for the Linux dialog to show in full, so nothing was sent; offer the user a shorter version.
+  Long URLs are fine, and parent posts and other context never cause it.
 - `OUTCOME_UNKNOWN` means the write may have gone through.
   Do the check named in the error's help before any second attempt.
 - `REPLY_NOT_SUMMONED` means X refuses this reply through the API.

@@ -1,5 +1,6 @@
-import { execFile, spawn } from "node:child_process";
+import { execFile, spawn, type ChildProcessByStdio } from "node:child_process";
 import { accessSync, constants, statSync } from "node:fs";
+import type { Readable } from "node:stream";
 
 /** `text` is exactly what X will publish or deliver. `content` describes the target of any other write. */
 export type ApprovalBody = { text: string } | { content: string };
@@ -32,6 +33,8 @@ export type Machine = {
 const DEFAULT_TIMEOUT_SECONDS = 120;
 const MAX_TIMEOUT_SECONDS = 3600;
 const DIALOG_TITLE = "x-axi: approve this action";
+// Room for a whole 280 character post after its "Replying to @handle: " prefix.
+const MAX_UNWRAPPED_CONTEXT = 320;
 export const SYSTEM_DIRECTORIES = ["/usr/bin", "/bin", "/usr/local/bin"] as const;
 // zenity comes first because it can make Cancel the default button and kdialog cannot.
 const LINUX_TOOLS: readonly LinuxTool[] = ["zenity", "kdialog"];
@@ -47,15 +50,30 @@ export function counted(count: number, noun: string): string {
   return `${count} ${noun}${count === 1 ? "" : "s"}`;
 }
 
-export function formatApproval(request: ApprovalRequest): string {
+function approvalHead(request: ApprovalRequest): string {
   const cost = request.estCostUsd === null ? "unknown" : `about $${request.estCostUsd.toFixed(3)}`;
-  // The tool writes the counts, so outgoing text cannot pass part of itself off as not sent.
-  const body = "text" in request
-    ? [`Text to send, all of it (${counted(Array.from(request.text).length, "character")}, ${counted(request.text.split("\n").length, "line")}):`, request.text]
-    : [request.content];
+  return `${request.action} as @${request.account} (${cost})`;
+}
+
+// The tool writes the counts, so outgoing text cannot pass part of itself off as not sent.
+function textLabel(text: string): string {
+  return `Text to send, all of it (${counted(Array.from(text).length, "character")}, ${counted(text.split("\n").length, "line")}):`;
+}
+
+const CONTEXT_RULE = "----- context from X, not sent -----";
+
+const cutMarker = (text: string): string => `[cut to fit: ${counted(Array.from(text).length, "character")} in full]`;
+
+/** The text for a dialog that has no line budget: macOS. */
+export function formatApproval(request: ApprovalRequest): string {
+  const body = "text" in request ? [textLabel(request.text), request.text] : [request.content];
   // The body comes first and context last, flattened, so text from X cannot pose as it.
-  const lines = [`${request.action} as @${request.account} (${cost})`, "", ...body];
-  if (request.context) lines.push("", "----- context from X, not sent -----", request.context);
+  const lines = [approvalHead(request), "", ...body];
+  if (request.context) {
+    const characters = Array.from(request.context);
+    const shown = characters.length <= MAX_UNWRAPPED_CONTEXT ? request.context : `${characters.slice(0, MAX_UNWRAPPED_CONTEXT).join("")}\n${cutMarker(request.context)}`;
+    lines.push("", CONTEXT_RULE, shown);
+  }
   return lines.join("\n");
 }
 
@@ -96,32 +114,101 @@ function approvalTimeoutSeconds(env: NodeJS.ProcessEnv): number {
 // These limits are conservative estimates for a 1024x768 screen, not measurements of a real window.
 const WRAP_CELLS = 50;
 const MAX_WRAPPED_LINES = 25;
-const MAX_UNBROKEN_CELLS = 60;
+// Held back from the text whether or not this action has context, so context can never decide a refusal:
+// one blank line, the context rule, and the context's cut marker.
+const CONTEXT_RESERVE_LINES = 3;
+const CONTINUES = "\u21b5";
 const BREAKS_ANYWHERE = String.raw`\p{sc=Han}\p{sc=Hiragana}\p{sc=Katakana}\p{sc=Hangul}`;
 const WIDE = new RegExp(`[${BREAKS_ANYWHERE}\\p{Extended_Pictographic}]`, "u");
 const WRAP_UNITS = new RegExp(`[${BREAKS_ANYWHERE}]|[^\\s${BREAKS_ANYWHERE}]+|\\s+`, "gu");
+const GRAPHEMES = new Intl.Segmenter(undefined, { granularity: "grapheme" });
 
 const cellsOf = (text: string): number => Array.from(text).reduce((sum, ch) => sum + (WIDE.test(ch) ? 2 : 1), 0);
 
-/** Whether a dialog that may not scroll can show all of this text, by greedy line wrapping. */
-export function fitsInDialog(text: string): boolean {
-  let lines = 0;
+/** Splits a run too wide for one row, leaving each piece room for the continuation mark. */
+function splitRun(run: string): string[] {
+  const pieces: string[] = [];
+  let piece = "";
+  let used = 0;
+  for (const { segment } of GRAPHEMES.segment(run)) {
+    const cells = cellsOf(segment);
+    if (used > 0 && used + cells > WRAP_CELLS - 1) {
+      pieces.push(piece);
+      piece = "";
+      used = 0;
+    }
+    piece += segment;
+    used += cells;
+  }
+  pieces.push(piece);
+  return pieces;
+}
+
+/**
+ * Greedy line wrapping. Each row keeps what ends it, so joining the rows gives the text back,
+ * changed only by the marked breaks inside runs too wide for a row.
+ */
+function wrapRows(text: string): { rows: string[]; breaks: number } {
+  const rows: string[] = [];
+  let breaks = 0;
   for (const line of text.split("\n")) {
-    lines += 1;
+    let row = "";
     let used = 0;
     for (const unit of line.match(WRAP_UNITS) ?? []) {
       const blank = !unit.trim();
       const cells = cellsOf(unit);
-      if (!blank && cells > MAX_UNBROKEN_CELLS) return false;
       if (used > 0 && used + cells > WRAP_CELLS) {
-        lines += 1;
+        rows.push(blank ? row + unit : row); // Whitespace at a wrap point takes no room.
+        row = "";
         used = 0;
-        if (blank) continue; // Whitespace at a wrap point takes no room.
+        if (blank) continue;
       }
-      used += cells;
+      if (!blank && cells > WRAP_CELLS) {
+        const pieces = splitRun(unit);
+        row = pieces.pop()!;
+        used = cellsOf(row);
+        rows.push(...pieces.map((piece) => `${piece}${CONTINUES}\n`));
+        breaks += pieces.length;
+      } else {
+        row += unit;
+        used += cells;
+      }
     }
+    rows.push(`${row}\n`);
   }
-  return lines <= MAX_WRAPPED_LINES;
+  return { rows, breaks };
+}
+
+const joinRows = (rows: string[]): string => rows.join("").slice(0, -1);
+
+const rowCount = (text: string): number => wrapRows(text).rows.length;
+
+/** Text the user cannot change gets whatever rows remain, and is cut with a marker instead of ever causing a refusal. */
+function clipToRows(text: string, maxRows: number): string {
+  const { rows } = wrapRows(text);
+  if (rows.length <= maxRows) return joinRows(rows);
+  const kept = rows.slice(0, maxRows - 1).join("").trimEnd();
+  return kept ? `${kept}\n${cutMarker(text)}` : cutMarker(text);
+}
+
+/**
+ * The text for a dialog that may not scroll, or null if the outgoing text cannot fit in it.
+ * Outgoing text must be shown in full to be approved, so it is the only thing that can cause a refusal.
+ */
+export function linuxApprovalText(request: ApprovalRequest): string | null {
+  const head = approvalHead(request);
+  const roomForBody = MAX_WRAPPED_LINES - CONTEXT_RESERVE_LINES;
+  let shown: string;
+  if ("text" in request) {
+    const { rows, breaks } = wrapRows(request.text);
+    const note = breaks ? [`This dialog splits long words at ${counted(breaks, "mark")} (${CONTINUES}), which are not sent.`] : [];
+    shown = [head, "", textLabel(request.text), ...note, joinRows(rows)].join("\n");
+    if (rowCount(shown) > roomForBody) return null;
+  } else {
+    shown = [head, "", clipToRows(request.content, roomForBody - rowCount(head) - 1)].join("\n");
+  }
+  if (!request.context) return shown;
+  return [shown, "", CONTEXT_RULE, clipToRows(request.context, MAX_WRAPPED_LINES - rowCount(shown) - 2)].join("\n");
 }
 
 const KDIALOG_ESCAPES: Record<string, string> = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "\\": "&#92;", "\n": "<br>" };
@@ -182,25 +269,34 @@ function dialogEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   return kept;
 }
 
-function linuxResult(tool: LinuxTool, code: number | null): ApprovalResult {
+// GTK exits 1 when it cannot open the display, the same code as the Cancel button. GTK 3 and 4 do not translate these.
+// Qt normally aborts instead, but its message is matched too so no tool can report a failure as a person's answer.
+const DISPLAY_FAILURE = /cannot open display|failed to open display|could not connect to display/i;
+const MAX_STDERR_CHARS = 64 * 1024;
+
+function linuxResult(tool: LinuxTool, code: number | null, stderr: string): ApprovalResult {
   if (code === 0) return "approved";
-  if (code === 1) return "cancelled";
+  if (code === 1) return DISPLAY_FAILURE.test(stderr) ? "unavailable" : "cancelled";
   if (tool === "zenity" && code === 5) return "timed_out";
-  return "unavailable"; // A crash, a signal, or a display that could not be opened.
+  return "unavailable"; // A crash, a signal, or any other failure.
 }
 
 function askLinux(tool: LinuxTool, path: string, text: string, env: NodeJS.ProcessEnv): Promise<ApprovalResult> {
-  if (!fitsInDialog(text)) return Promise.resolve("too_long");
   const timeout = approvalTimeoutSeconds(env);
   return new Promise((resolve) => {
-    let child;
+    let child: ChildProcessByStdio<null, null, Readable>;
     try {
-      // No shell and no stdio: the answer is the exit code, and nothing can type into the tool.
-      child = spawn(path, linuxDialogArgs(tool, text, timeout), { stdio: "ignore", env: dialogEnvironment(env) });
+      // No shell and no stdin: the answer is the exit code, and nothing can type into the tool.
+      child = spawn(path, linuxDialogArgs(tool, text, timeout), { stdio: ["ignore", "ignore", "pipe"], env: dialogEnvironment(env) });
     } catch {
       resolve("unavailable"); // For example, a NUL in the text.
       return;
     }
+    let stderr = "";
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < MAX_STDERR_CHARS) stderr += chunk;
+    });
     // kdialog has no timeout of its own. The kill also covers a zenity that hangs or ignores its --timeout.
     const timer = setTimeout(() => {
       child.kill("SIGKILL");
@@ -210,9 +306,10 @@ function askLinux(tool: LinuxTool, path: string, text: string, env: NodeJS.Proce
       clearTimeout(timer);
       resolve("unavailable");
     });
-    child.once("exit", (code) => {
+    // "close" rather than "exit", so all of stderr has arrived before the exit code is read.
+    child.once("close", (code) => {
       clearTimeout(timer);
-      resolve(linuxResult(tool, code));
+      resolve(linuxResult(tool, code, stderr));
     });
   });
 }
@@ -247,8 +344,9 @@ export function createApprover(machine: Machine): Approver {
   return (request) => {
     const backend = selectBackend(machine);
     if (backend.kind === "none") return Promise.resolve(backend.reason);
-    const text = formatApproval(request);
-    if (backend.kind === "osascript") return askMac(backend.path, text, machine.env);
+    if (backend.kind === "osascript") return askMac(backend.path, formatApproval(request), machine.env);
+    const text = linuxApprovalText(request);
+    if (text === null) return Promise.resolve("too_long");
     return askLinux(backend.kind, backend.path, text, machine.env);
   };
 }

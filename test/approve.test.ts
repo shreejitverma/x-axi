@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
   createApprover,
-  fitsInDialog,
   formatApproval,
   isExecutableFile,
+  linuxApprovalText,
   selectBackend,
   SYSTEM_DIRECTORIES,
   type ApprovalRequest,
@@ -65,21 +65,90 @@ describe("selectBackend", () => {
   });
 });
 
-describe("fitsInDialog", () => {
+// The dialog budget is 25 rows of 50 cells, with 3 rows always held back for context.
+const rowsOf = (shown: string) => shown.split("\n").length;
+
+describe("linuxApprovalText", () => {
   it.each([
-    ["a full 280 character post with a parent of the same size", formatApproval({ ...REQUEST, text: "word ".repeat(56), context: "word ".repeat(56) }), true],
-    ["1000 ordinary characters", "word ".repeat(200), true],
-    ["a 60 character URL", `https://example.com/${"a".repeat(40)}`, true],
+    ["a 280 character post", "word ".repeat(56), true],
+    ["750 ordinary characters", "word ".repeat(150), true],
+    ["a 100 character URL", `https://example.com/${"a".repeat(80)}`, true],
     ["a 280 character CJK post, which wraps anywhere", "漢".repeat(280 / 2), true],
-    ["25 lines", Array(25).fill("line").join("\n"), true],
+    ["15 lines", Array(15).fill("line").join("\n"), true],
     ["26 lines", Array(26).fill("line").join("\n"), false],
     ["text that only overflows once wrapped", "word ".repeat(300), false],
-    ["wide words that waste each line", Array(26).fill("x".repeat(40)).join(" "), false],
     ["wide characters that overflow sooner", "漢".repeat(700), false],
-    ["a 61 character word", "a".repeat(61), false],
-    ["a word that is too wide only because emoji count double", "a\u{1f600}".repeat(21), false],
+    ["an unbroken word that needs more rows than there are", "a".repeat(2000), false],
   ])("%s", (_name, text, fits) => {
-    expect(fitsInDialog(text)).toBe(fits);
+    expect(linuxApprovalText({ ...REQUEST, text }) !== null).toBe(fits);
+  });
+
+  it("leaves short text exactly as macOS shows it", () => {
+    const request = { ...REQUEST, text: "a\n\nb", context: "Replying to @alice: hi" };
+    expect(linuxApprovalText(request)).toBe(formatApproval(request));
+  });
+
+  it("hard-wraps a long run at 49 cells plus the mark, and counts the breaks", () => {
+    expect(linuxApprovalText({ ...REQUEST, text: "a".repeat(200) })).toBe(
+      [
+        "Post as @shreejit (about $0.015)",
+        "",
+        "Text to send, all of it (200 characters, 1 line):",
+        "This dialog splits long words at 4 marks (\u21b5), which are not sent.",
+        ...Array(4).fill(`${"a".repeat(49)}\u21b5`),
+        "aaaa",
+      ].join("\n"),
+    );
+  });
+
+  it("gives a run of 50 cells its own row without a mark", () => {
+    const shown = linuxApprovalText({ ...REQUEST, text: "a".repeat(50) })!;
+    expect(shown).not.toContain("\u21b5");
+    expect(shown).not.toContain("splits long words");
+  });
+
+  it("never splits inside an emoji sequence", () => {
+    const programmer = "\u{1f469}\u200d\u{1f4bb}";
+    const shown = linuxApprovalText({ ...REQUEST, text: programmer.repeat(30) })!;
+    const body = shown.slice(shown.indexOf(programmer));
+    expect(body).toContain("\u21b5");
+    expect(body.replaceAll("\u21b5\n", "")).toBe(programmer.repeat(30));
+    for (const row of body.split("\n")) expect(row.startsWith(programmer)).toBe(true);
+  });
+
+  it("cuts context to the rows left, with its full count, without changing the verdict on the text", () => {
+    const text = Array(19).fill("line").join("\n");
+    expect(rowsOf(linuxApprovalText({ ...REQUEST, text })!)).toBe(22);
+    const context = "word ".repeat(1000);
+    const shown = linuxApprovalText({ ...REQUEST, text, context })!;
+    expect(shown).toContain(`${text}\n\n----- context from X, not sent -----\n[cut to fit: 5000 characters in full]`);
+    expect(rowsOf(shown)).toBe(25);
+    expect(linuxApprovalText({ ...REQUEST, text: `${text}\nline`, context })).toBeNull();
+    expect(linuxApprovalText({ ...REQUEST, text: `${text}\nline` })).toBeNull();
+  });
+
+  it("shows as much context as fits before the cut", () => {
+    const context = "word ".repeat(1000);
+    const shown = linuxApprovalText({ ...REQUEST, text: "hello", context })!;
+    expect(shown).toContain("----- context from X, not sent -----\nword word");
+    expect(shown.endsWith("\n[cut to fit: 5000 characters in full]")).toBe(true);
+    expect(rowsOf(shown)).toBeLessThanOrEqual(25);
+  });
+
+  it("cuts a target it cannot fit, and never refuses it", () => {
+    const shown = linuxApprovalText({ action: "Delete post", account: "me", content: "word ".repeat(1000), estCostUsd: 0.01 })!;
+    expect(shown.startsWith("Delete post as @me (about $0.010)\n\nword word")).toBe(true);
+    expect(shown.endsWith("\n[cut to fit: 5000 characters in full]")).toBe(true);
+    expect(rowsOf(shown)).toBeLessThanOrEqual(22);
+  });
+});
+
+describe("formatApproval", () => {
+  it("shows a 280 character parent whole and cuts a longer one with its full count", () => {
+    const whole = `Replying to @fifteencharname: ${"p".repeat(280)}`;
+    expect(formatApproval({ ...REQUEST, context: whole })).toContain(whole);
+    const shown = formatApproval({ ...REQUEST, context: "p".repeat(5000) });
+    expect(shown.endsWith(`\n${"p".repeat(320)}\n[cut to fit: 5000 characters in full]`)).toBe(true);
   });
 });
 
@@ -133,7 +202,12 @@ describe("Linux dialog against a fake executable", () => {
     it.each([
       ["exit 0", "exit 0", "approved"],
       ["exit 1, the Cancel button", "exit 1", "cancelled"],
-      ["exit 255, cannot open the display", "exit 255", "unavailable"],
+      ["exit 1 with an unrelated warning", 'echo "Gtk-WARNING **: theme not found" >&2; exit 1', "cancelled"],
+      ["exit 1 from GTK 3 with no display", 'echo "(zenity:7): Gtk-WARNING **: cannot open display: :99" >&2; exit 1', "unavailable"],
+      ["exit 1 from GTK 4 with no display", 'echo "Gtk-WARNING **: Failed to open display" >&2; exit 1', "unavailable"],
+      ["exit 1 from Qt with no display", 'echo "qt.qpa.xcb: could not connect to display :99" >&2; exit 1', "unavailable"],
+      ["a display message with exit 0, the only approval signal", 'echo "cannot open display" >&2; exit 0', "approved"],
+      ["exit 255", "exit 255", "unavailable"],
       ["exit 3", "exit 3", "unavailable"],
       ["a crash by signal", "kill -SEGV $$", "unavailable"],
     ])("treats %s correctly", async (_name, body, result) => {
@@ -169,12 +243,17 @@ describe("Linux dialog against a fake executable", () => {
       await expect(ask()).resolves.toBe("cancelled");
     });
 
-    it("does not offer approval for text the dialog cannot show in full", async () => {
+    it("does not offer approval for outgoing text the dialog cannot show in full", async () => {
       plant(bin, tool, "exit 0");
-      await expect(ask({}, { ...REQUEST, text: "a".repeat(200) })).resolves.toBe("too_long");
+      await expect(ask({}, { ...REQUEST, text: "a".repeat(2000) })).resolves.toBe("too_long");
       await expect(ask({}, { ...REQUEST, text: Array(30).fill("line").join("\n") })).resolves.toBe("too_long");
-      await expect(ask({}, { ...REQUEST, context: "word ".repeat(400) })).resolves.toBe("too_long");
       expect(existsSync(argvFile)).toBe(false);
+    });
+
+    it("opens the dialog for context and targets of any length", async () => {
+      plant(bin, tool, "exit 0");
+      await expect(ask({}, { ...REQUEST, context: "word ".repeat(400) })).resolves.toBe("approved");
+      await expect(ask({}, { action: "Delete post", account: "me", content: "a".repeat(5000), estCostUsd: null })).resolves.toBe("approved");
     });
 
     it("ignores an approving tool planted on PATH when the real one cancels", async () => {
