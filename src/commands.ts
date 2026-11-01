@@ -630,7 +630,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const account = readAccount();
       return {
         account: account ? `@${account.username}` : "not connected",
-        login: status.logged_in ? "stored" : status.problem ? "unknown, the keystore could not be read" : "none",
+        login: status.logged_in ? "stored" : status.problem ? "unknown, see storage_problem" : "none",
         storage: status.storage,
         ...(status.problem ? { storage_problem: status.problem } : {}),
         client_id: config.client_id ? `configured in ${configPath()}` : `not configured; pass --client-id to login, saved to ${configPath()}`,

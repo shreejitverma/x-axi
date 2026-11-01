@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
 import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
-import type { AuthService, AuthStatus, LogoutReport } from "../src/auth.js";
+import { createAuth, type AuthService, type AuthStatus, type LogoutReport } from "../src/auth.js";
 import { buildCommands } from "../src/commands.js";
 import { readConfig } from "../src/config.js";
 
@@ -1191,6 +1191,14 @@ describe("account commands", () => {
     const h = harness(() => PARENT);
     const auth = fakeAuth({ status: async () => ({ logged_in: false, storage: "unavailable (no keystore)", problem: "no OS keystore is available", help: ["Install secret-tool"] }) });
     const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth })["setup"]!([]);
-    expect(out).toMatchObject({ login: expect.stringContaining("unknown"), storage_problem: "no OS keystore is available", help: ["Install secret-tool"] });
+    expect(out).toMatchObject({ login: "unknown, see storage_problem", storage_problem: "no OS keystore is available", help: ["Install secret-tool"] });
+  });
+
+  it("setup does not blame the keystore for a stored record it can read but not use", async () => {
+    const h = harness(() => PARENT);
+    const store = { backend: "fake keystore", read: async () => JSON.stringify({ version: 99 }), write: async () => undefined, delete: async () => undefined };
+    const auth = createAuth({ store, endpoints: { authorize: "http://127.0.0.1:9/a", token: "http://127.0.0.1:9/t", revoke: "http://127.0.0.1:9/r" }, redirectUri: "http://127.0.0.1:8711/callback", lockDir: dir, openBrowser: async () => undefined, log: () => undefined });
+    const out = await buildCommands({ client: { request: async () => ME }, approve: h.approve, auth })["setup"]!([]);
+    expect(out).toMatchObject({ login: "unknown, see storage_problem", storage_problem: expect.stringContaining("not one this version can read"), help: [expect.stringContaining("x-axi logout")] });
   });
 });

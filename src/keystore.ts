@@ -110,7 +110,7 @@ export function keychainStore(run: CommandRunner, keychain?: string): Keystore {
   const target = keychain === undefined ? [] : [keychain];
   const fail = (action: string, result: CommandResult, secrets?: string[]): AxiError => {
     if (result.code === ERR_SEC_INTERACTION_NOT_ALLOWED) {
-      return new AxiError(`the keychain is locked and this session cannot show an unlock prompt, so the x-axi login could not be ${action}`, "KEYSTORE_LOCKED", [
+      return new AxiError(`the keychain is locked and this session cannot show an unlock prompt, so x-axi could not ${action} its login`, "KEYSTORE_LOCKED", [
         "Unlock it with `security unlock-keychain` in that session, or log in to the Mac's desktop session",
       ]);
     }
@@ -131,11 +131,11 @@ export function keychainStore(run: CommandRunner, keychain?: string): Keystore {
         throw new AxiError("the login record is too large to store in the keychain safely; nothing was written", "KEYSTORE_ERROR");
       }
       const result = await run({ file: SECURITY, args: ["-i"], stdin: line });
-      if (result.code !== 0) throw fail("stored", result, [secret, encoded]);
+      if (result.code !== 0) throw fail("store", result, [secret, encoded]);
     },
     async delete() {
       const result = await run({ file: SECURITY, args: ["delete-generic-password", "-a", ACCOUNT, "-s", SERVICE, ...target] });
-      if (result.code !== 0 && !(await keychainSaysNotFound(result, run))) throw fail("deleted", result);
+      if (result.code !== 0 && !(await keychainSaysNotFound(result, run))) throw fail("delete", result);
     },
   };
 }

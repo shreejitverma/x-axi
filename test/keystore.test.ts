@@ -81,13 +81,25 @@ describe("macOS Keychain command construction", () => {
     await expect(keychainStore(r.run).read()).rejects.toMatchObject({ code: "KEYSTORE_LOCKED" });
   });
 
+  it("names the failed action in plain words for every keychain operation", async () => {
+    const failing = recorder(() => ({ code: 1, stderr: "boom" }));
+    await expect(keychainStore(failing.run).read()).rejects.toMatchObject({ message: "macOS Keychain could not read the x-axi login: boom" });
+    await expect(keychainStore(failing.run).write(SECRET)).rejects.toMatchObject({ message: "macOS Keychain could not store the x-axi login: boom" });
+    await expect(keychainStore(failing.run).delete()).rejects.toMatchObject({ message: "macOS Keychain could not delete the x-axi login: boom" });
+    const locked = recorder(() => ({ code: 36, stderr: "User interaction is not allowed." }));
+    const prefix = "the keychain is locked and this session cannot show an unlock prompt, so x-axi could not";
+    await expect(keychainStore(locked.run).read()).rejects.toMatchObject({ message: `${prefix} read its login` });
+    await expect(keychainStore(locked.run).write(SECRET)).rejects.toMatchObject({ message: `${prefix} store its login` });
+    await expect(keychainStore(locked.run).delete()).rejects.toMatchObject({ message: `${prefix} delete its login` });
+  });
+
   it("keeps the secret out of a write error even when security echoes its input", async () => {
     const r = recorder(() => ({ code: 1, stderr: `security: unknown command "${ENCODED}"\nmore` }));
     const error = await keychainStore(r.run).write(SECRET).catch((e: Error) => e);
     expect(error).toMatchObject({ code: "KEYSTORE_ERROR" });
     expect(error.message).not.toContain(ENCODED);
     expect(error.message).not.toContain("SECRET");
-    expect(error.message).toContain("[redacted]");
+    expect(error.message).toBe('macOS Keychain could not store the x-axi login: security: unknown command "[redacted]"');
   });
 
   it("rejects a record it did not write instead of returning garbage", async () => {
