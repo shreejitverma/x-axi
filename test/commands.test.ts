@@ -769,7 +769,7 @@ describe.each(["zenity", "kdialog"])("Linux dialog limits with a fake %s", (tool
     const h = linux(() => ok({ data: { id: "60" } }, 201));
     const error = await h.commands["post"]!([text]).catch((e: unknown) => e);
     expect(error).toMatchObject({ code: "APPROVAL_TEXT_TOO_LONG" });
-    expect((error as Error).message).toContain("about 25 rows of 50 columns once wrapped");
+    expect((error as Error).message).toContain("about 950 characters of plain text");
     expect((error as Error).message).not.toContain("lines");
     expect((error as { suggestions: string[] }).suggestions.join("\n")).toMatch(/Shorten the text/);
     expect(h.writes()).toEqual([]);

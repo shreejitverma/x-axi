@@ -72,7 +72,8 @@ const rowsOf = (shown: string) => shown.split("\n").length;
 describe("linuxApprovalText", () => {
   it.each([
     ["a 280 character post", "word ".repeat(56), true],
-    ["750 ordinary characters", "word ".repeat(150), true],
+    ["950 ordinary characters, the room the refusal states", "word ".repeat(190), true],
+    ["1000 ordinary characters", "word ".repeat(200), false],
     ["a 100 character URL", `https://example.com/${"a".repeat(80)}`, true],
     ["a 280 character CJK post, which wraps anywhere", "漢".repeat(280 / 2), true],
     ["15 lines", Array(15).fill("line").join("\n"), true],

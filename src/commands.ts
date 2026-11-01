@@ -330,7 +330,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         "Run writes on macOS or Linux; there is no terminal prompt or override",
       ],
       too_long: [
-        "this text is too long for the Linux approval dialog, which must show all of it and holds about 25 rows of 50 columns once wrapped; nothing was sent",
+        "this text is too long for the Linux approval dialog, which must show all of it and has room for about 19 rows of 50 columns of text once wrapped, or about 950 characters of plain text; nothing was sent",
         "APPROVAL_TEXT_TOO_LONG",
         "Shorten the text; parent posts and other context never cause this, and a URL wider than one row is split only for display and sent unchanged",
       ],
