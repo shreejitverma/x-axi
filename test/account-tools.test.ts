@@ -608,6 +608,22 @@ describe("following and followers", () => {
     await expect(h.commands["following"]!(["bob", "--limit", "500", "--max-spend", "5.01"])).resolves.toMatchObject({ count: 500 });
   });
 
+  it("cuts a page short at the cap when X's count is too low", async () => {
+    const h = harness(lists({ "2": { counts: { username: "bob", following_count: 10 }, following: manyUsers(5000) } }));
+    // $0.01 lookup leaves $0.99, which buys 99 rows at the $0.01 list rate.
+    const out = await h.commands["following"]!(["bob", "--limit", "1000", "--max-spend", "1"]);
+    expect(out).toMatchObject({ count: 99, next_token: "token99", est_cost: "$1.000" });
+    expect(h.reads().at(-1)!.path).toContain("max_results=99");
+  });
+
+  it("refuses a page the cap cannot buy one row of, reading nothing, even when X's count is 0", async () => {
+    const h = harness(lists({ "2": { counts: { username: "bob", following_count: 0 }, following: manyUsers(5) } }));
+    const error = await h.commands["following"]!(["bob", "--max-spend", "0.01"]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe("SPEND_CAP");
+    expect(error.suggestions.join(" ")).toContain("--max-spend 0.02");
+    expect(h.reads().filter((c) => c.path.includes("/following"))).toEqual([]);
+  });
+
   it.each([["--max-spend", "0"], ["--max-spend", "-1"], ["--max-spend", "lots"], ["--limit", "1001"], ["--limit", "0"]])("refuses %s %s before any call", async (flag, value) => {
     const h = harness(lists({}));
     await expect(h.commands["following"]!(["bob", flag, value])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
@@ -657,6 +673,28 @@ describe("following and followers", () => {
     const result = await h.commands["following"]!(["bob", "--all", "--out", out, "--max-spend", "20"]);
     expect(result).toMatchObject({ export: { written: 1000, complete: false }, stopped: { code: "RATE_LIMITED" }, next_token: "token1000" });
     expect(JSON.parse(readFileSync(out, "utf8"))).toHaveLength(1000);
+    expect((result["help"] as string[])[0]).toContain("do not retry in a loop");
+  });
+
+  it("--all is not complete when X reports partial errors", async () => {
+    const out = join(dir, "export.json");
+    const list = lists({ "2": bob(manyUsers(2)) });
+    const h = harness((c) => (c.path.includes("/following") ? ok({ data: [user(1000)], errors: [{ detail: "hidden" }], meta: { result_count: 1 } }) : list(c)));
+    const result = await h.commands["following"]!(["bob", "--all", "--out", out]);
+    expect(result).toMatchObject({ export: { written: 1, complete: false }, partial_errors: 1 });
+  });
+
+  it.each([
+    ["an app outside the package", { detail: "client-forbidden" }, 403, "APP_NOT_ENROLLED", "Pay-per-use"],
+    ["a revoked login", { detail: "nope" }, 401, "AUTH_REQUIRED", "x-axi auth status"],
+  ])("--all keeps X's remedy when the first page fails on %s", async (_name, body, status, code, remedy) => {
+    const out = join(dir, "export.json");
+    const list = lists({ "2": bob(manyUsers(5)) });
+    const h = harness((c) => (c.path.includes("/following") ? ok(body, status) : list(c)));
+    const error = await h.commands["following"]!(["bob", "--all", "--out", out]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+    expect(error.code).toBe(code);
+    expect(error.suggestions.join(" ")).toContain(remedy);
+    expect(existsSync(out)).toBe(false);
   });
 
   it("--all fails as an error with no file when the first page fails", async () => {
@@ -745,6 +783,25 @@ describe("following and followers", () => {
       const h = harness((c) => (c.path.includes("/2/users/1/following") && c.path.includes("pagination_token") ? ok({ detail: "boom" }, 503) : list(c)));
       await expect(h.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "5"])).rejects.toMatchObject({ message: expect.stringContaining("no queue was written") });
       expect(existsSync(out)).toBe(false);
+    });
+
+    it("puts X's remedy first when a rate limit stops the read", async () => {
+      const out = join(dir, "queue.json");
+      const list = lists(plan([user(10)], [user(12)]));
+      const h = harness((c) => (c.path.includes("/2/users/1/following") ? ok({ reset_at: "later" }, 429) : list(c)));
+      const error = await h.commands["follow-plan"]!(["bob", "--out", out]).catch((e: { code: string; suggestions: string[] }) => e) as { code: string; suggestions: string[] };
+      expect(error.code).toBe("RATE_LIMITED");
+      expect(error.suggestions[0]).toContain("do not retry in a loop");
+      expect(existsSync(out)).toBe(false);
+    });
+
+    it("says how to raise the cap when the cap stops the read", async () => {
+      const out = join(dir, "queue.json");
+      const accounts = plan([], manyUsers(500));
+      accounts["2"]!.counts = { username: "bob", following_count: 5 };
+      const h = harness(lists(accounts));
+      const error = await h.commands["follow-plan"]!(["bob", "--out", out, "--max-spend", "1"]).catch((e: { suggestions: string[] }) => e) as { suggestions: string[] };
+      expect(error.suggestions[0]).toContain("--max-spend");
     });
 
     it("writes no queue when X reports partial errors on your own list", async () => {

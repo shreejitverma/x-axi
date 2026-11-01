@@ -170,7 +170,7 @@ export const HELP: Record<string, string> = {
   search: "usage: x-axi search <query> [--limit 10-100] [--next TOKEN] [--full]\nRecent search, last 7 days. Each result costs about $0.005.",
   user: "usage: x-axi user <handle>",
   dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text> [--dry-run]   (needs your approval)\nEncrypted XChat conversations are not covered.",
-  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and --all stops at the cap. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
+  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and if X's total proves too low, a page is cut short at the cap and --all stops there. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
   followers: "usage: x-axi followers [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi followers [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts following a user; yours without a handle. Costs, caps, and the unfiltered --all export as for `following`.",
   "follow-plan": "usage: x-axi follow-plan <handle> --out queue.json [--max-spend USD] [--include-protected]\nReads that account's following and your own following once, removes accounts you already follow and yourself, and writes a queue for follow-file. Protected accounts go to <out>.protected.json instead of the queue unless you pass --include-protected. Writes nothing to X. About $0.01 per account listed, $0.001 on your own list when you own the app, and $0.02 for the two lookups that give the totals. An estimate above $1 refuses without a --max-spend that covers it. Never overwrites a file, and writes no queue from an incomplete read.",
   post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
@@ -529,7 +529,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     rows: UserRow[];
     partial: number;
     next?: string;
-    stopped?: { code: string; reason: string };
+    stopped?: AxiError;
   }
 
   const listCount = (data: Json, side: ListSide): number | undefined => {
@@ -565,25 +565,28 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     return { rows, ...(meta?.next_token ? { next: meta.next_token } : {}), partial: Array.isArray(body["errors"]) ? (body["errors"] as Json[]).length : 0, body };
   };
 
-  /** Sizes every page to what the cap still allows, so even a wrong total cannot spend past it. A failure keeps what was already paid for. */
+  /** How many rows the cap still allows, so even a wrong total from X cannot spend past it. */
+  const rowsWithinCap = (target: ListTarget, cap: number): number => Math.floor((cap - recorded) / target.rate + 1e-9);
+
+  /** A failure keeps what was already paid for. */
   const readAllUsers = async (target: ListTarget, side: ListSide, op: string, cap: number, start?: string): Promise<ReadAll> => {
     const out: ReadAll = { rows: [], partial: 0 };
     let token = start;
     for (;;) {
-      const room = Math.floor((cap - recorded) / target.rate + 1e-9);
-      if (room < 1) return { ...out, ...(token ? { next: token } : {}), stopped: { code: "SPEND_CAP", reason: `the ${money(cap)} spend cap was reached` } };
+      const room = rowsWithinCap(target, cap);
+      if (room < 1) return { ...out, ...(token ? { next: token } : {}), stopped: new AxiError(`the ${money(cap)} spend cap was reached`, "SPEND_CAP", ["Raise --max-spend to read further"]) };
       let page;
       try {
         page = await userPage(target, side, Math.min(USER_PAGE_MAX, room), token, op);
       } catch (error) {
         if (!(error instanceof AxiError)) throw error;
-        return { ...out, ...(token ? { next: token } : {}), stopped: { code: error.code, reason: error.message } };
+        return { ...out, ...(token ? { next: token } : {}), stopped: error };
       }
       out.rows.push(...page.rows);
       out.partial += page.partial;
       if (!page.next) return out;
       token = page.next;
-      if (!page.rows.length) return { ...out, next: token, stopped: { code: "X_UNAVAILABLE", reason: "X returned an empty page with a next token" } };
+      if (!page.rows.length) return { ...out, next: token, stopped: new AxiError("X returned an empty page with a next token", "X_UNAVAILABLE") };
     }
   };
 
@@ -636,7 +639,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
     if (estimate !== undefined && estimate > cap) throw spendCapError(`Reading ${count} of the ${total} ${side} of ${name}`, estimate, cap);
     if (out === undefined) {
-      const page = await userPage(target, side, limit, next, side);
+      const room = rowsWithinCap(target, cap);
+      if (room < 1) throw spendCapError(`Reading a page of the ${total} ${side} of ${name}`, recorded + target.rate, cap);
+      const page = await userPage(target, side, Math.min(limit, room), next, side);
       return {
         target: name,
         total,
@@ -652,17 +657,17 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const result = await readAllUsers(target, side, side, cap, next);
     if (result.stopped && !result.rows.length && result.stopped.code !== "SPEND_CAP") {
       rmSync(file, { force: true });
-      throw new AxiError(result.stopped.reason, result.stopped.code);
+      throw result.stopped;
     }
     writeJson(file, result.rows);
     return {
-      export: { target: name, total, written: result.rows.length, file, complete: !result.stopped },
+      export: { target: name, total, written: result.rows.length, file, complete: !result.stopped && !result.partial },
       ...(result.partial ? { partial_errors: result.partial } : {}),
-      ...(result.stopped ? { stopped: result.stopped } : {}),
+      ...(result.stopped ? { stopped: { code: result.stopped.code, reason: result.stopped.message } } : {}),
       ...(result.next ? { next_token: result.next } : {}),
       est_cost: money(recorded),
       help: [
-        ...(result.stopped ? [result.next ? `The file holds what was read. Continue into a new file with --next ${result.next}; raise --max-spend if the cap stopped it` : "The file holds what was read"] : []),
+        ...(result.stopped ? [...result.stopped.suggestions, result.next ? `The file holds what was read. Continue into a new file with --next ${result.next}` : "The file holds what was read"] : []),
         "This export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan <handle> --out queue.json`",
       ],
     };
@@ -694,9 +699,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const incomplete = (whose: string, result: ReadAll): AxiError => {
       rmSync(out, { force: true });
       return new AxiError(
-        `${whose} could not be read in full (${result.stopped?.reason ?? `X reported ${result.partial} partial errors`}), so no queue was written; ${money(recorded)} was spent`,
+        `${whose} could not be read in full (${result.stopped?.message ?? `X reported ${result.partial} partial errors`}), so no queue was written; ${money(recorded)} was spent`,
         result.stopped?.code ?? "INCOMPLETE_READ",
-        ["A queue from a partial list could hold accounts you already follow. X does not re-bill what it served within a UTC day, so a rerun that day should cost little"],
+        [...(result.stopped?.suggestions ?? []), "A queue from a partial list could hold accounts you already follow. X does not re-bill what it served within a UTC day, so a rerun that day should cost little"],
       );
     };
     // Your own list comes first and must be whole: it is what keeps already-followed accounts out of the queue.
