@@ -32,10 +32,11 @@ To update, run `git pull && pnpm install --frozen-lockfile && pnpm run build` in
 
 The client ID is not a secret.
 `login` saves it to `~/.config/x-axi/config.json` (or `$XDG_CONFIG_HOME/x-axi/config.json`, or `$X_AXI_CONFIG_DIR/config.json`), so later runs need no flag.
-`X_AXI_CLIENT_ID` in the environment also works.
-The same file may hold `redirect_uri` if port 8711 is taken; it must stay a loopback `http://127.0.0.1` URL, and the value registered with X must match it exactly.
+If port 8711 is taken, set `redirect_uri` in the same file to another `http://127.0.0.1` URL with a port from 1024 to 65535.
+Register that exact URI as the Callback URI in the X portal as well, because X refuses a login whose callback differs; `x-axi setup` prints the URI in use.
 
-x-axi requests only the scopes its commands use: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write dm.read dm.write offline.access`.
+x-axi requests these scopes: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write dm.read dm.write offline.access`.
+The commands use all of them except `follows.read`, which is requested ahead of the queue builder so that you need not consent a second time.
 The raw `x-axi api` command can reach only endpoints those scopes cover.
 
 ### Upgrading from a version that used xurl
@@ -72,7 +73,8 @@ Access tokens last two hours.
 Before each API call x-axi reads the record and, within two minutes of expiry, refreshes it at `https://api.x.com/2/oauth2/token` with `client_id` in the form body.
 A file lock in the state directory (`auth.lock`, carrying a random owner token and touched every five seconds while held) serialises refreshes, logins, and logouts across x-axi processes, so a single-use refresh token is spent once and a logout cannot be undone by a refresh that was already in flight.
 A lock untouched for a minute is treated as left by a crashed process and claimed atomically.
-The new record is written to the keystore before the new token is used; if that write fails after X has already rotated the token, the command says so and asks for a new login rather than hiding it.
+The new record is written to the keystore before the new token is used; if that write fails after X has already rotated the token, the command says so and asks for a new login rather than hiding it, and makes one attempt to revoke the tokens it could not keep.
+`login` reads the keystore before it opens the browser, so a missing or locked keystore stops it before any consent, and if the final save still fails it makes the same attempt to revoke and reports the result.
 If X rejects the refresh token, the command fails with `AUTH_REQUIRED` and the stored login is left in place for you to inspect with `auth status` or remove with `logout`; nothing is cleared silently and nothing is retried.
 A rate limit or an unusable answer from the token endpoint is reported as `X_UNAVAILABLE` and changes nothing.
 Error messages have every known token removed before they are printed.

@@ -215,6 +215,32 @@ export function createAuth(deps: AuthDeps): AuthService {
     }
   };
 
+  const revokeAll = async (credentials: Credentials): Promise<Pick<LogoutReport, "revoked" | "revoke_failed">> => {
+    const outcome = { revoked: [] as string[], revoke_failed: {} as Record<string, string> };
+    const tokens: ["access_token" | "refresh_token", string | undefined][] = [
+      ["access_token", credentials.access_token],
+      ["refresh_token", credentials.refresh_token],
+    ];
+    for (const [kind, token] of tokens) {
+      if (!token) continue;
+      try {
+        await revokeToken(deps.endpoints.revoke, credentials.client_id, token, kind, fetchLike);
+        outcome.revoked.push(kind);
+      } catch (error) {
+        outcome.revoke_failed[kind] = scrub((error as Error).message, [credentials.access_token, credentials.refresh_token]);
+      }
+    }
+    return outcome;
+  };
+
+  /** Tokens X issued that nothing here can keep must not stay live at X. Best effort; the result says how it went. */
+  const discardUnsaved = async (credentials: Credentials): Promise<string> => {
+    const { revoke_failed } = await revokeAll(credentials);
+    return Object.keys(revoke_failed).length
+      ? "the new tokens could not all be revoked at X, so revoke the app at https://x.com/settings/connected_apps to be sure"
+      : "the new tokens were revoked at X";
+  };
+
   const refresh = async (): Promise<string> =>
     withCredentialLock(async () => {
       // Another process may have refreshed while this one waited for the lock.
@@ -241,7 +267,8 @@ export function createAuth(deps: AuthDeps): AuthService {
       } catch (error) {
         // X has already consumed the old refresh token, so the stored login is dead and the user must know.
         const reason = error instanceof AxiError ? error.message : String(error);
-        throw authRequired(`X refreshed the login, but the new tokens could not be saved (${scrub(reason, [...secrets, next.access_token, next.refresh_token])}), so the stored login no longer works`);
+        const discarded = await discardUnsaved(next);
+        throw authRequired(`X refreshed the login, but the new tokens could not be saved (${scrub(reason, [...secrets, next.access_token, next.refresh_token])}), so the stored login no longer works; ${discarded}`);
       }
       return next.access_token;
     });
@@ -271,9 +298,16 @@ export function createAuth(deps: AuthDeps): AuthService {
         deps.loginTimeoutMs ?? DEFAULT_LOGIN_TIMEOUT_MS,
       );
       server = createServer((req, res) => {
-        const url = new URL(req.url ?? "/", `http://${redirect.host}`);
         res.setHeader("Content-Type", "text/plain; charset=utf-8");
         res.setHeader("Connection", "close");
+        let url: URL;
+        try {
+          url = new URL(req.url ?? "/", `http://${redirect.host}`);
+        } catch {
+          res.statusCode = 400;
+          res.end("x-axi: not a request this callback understands\n");
+          return;
+        }
         if (req.method !== "GET" || url.pathname !== redirect.pathname) {
           res.statusCode = 404;
           res.end("x-axi: not the callback path\n");
@@ -325,6 +359,12 @@ export function createAuth(deps: AuthDeps): AuthService {
     },
 
     async login(clientId) {
+      // Before the browser: a keystore that cannot be read will not keep the tokens X is about to issue.
+      try {
+        await deps.store.read();
+      } catch (error) {
+        if (!(error instanceof AxiError && error.code === "KEYSTORE_CORRUPT")) throw error;
+      }
       const verifier = randomVerifier();
       const state = randomState();
       const url = authorizeUrl(deps.endpoints.authorize, { clientId, redirectUri: deps.redirectUri, scopes: SCOPES, state, codeChallenge: codeChallenge(verifier) });
@@ -348,7 +388,14 @@ export function createAuth(deps: AuthDeps): AuthService {
       }
       const credentials = fromTokens(tokens, clientId, undefined, now());
       // Under the lock, so a refresh in another process cannot write the previous login back over this one.
-      await withCredentialLock(() => deps.store.write(JSON.stringify(credentials)));
+      try {
+        await withCredentialLock(() => deps.store.write(JSON.stringify(credentials)));
+      } catch (error) {
+        const known = error instanceof AxiError;
+        const reason = known ? error.message : String(error);
+        const discarded = await discardUnsaved(credentials);
+        throw new AxiError(`X granted the login, but it could not be saved (${scrub(reason, [credentials.access_token, credentials.refresh_token])}); ${discarded}`, known ? error.code : "KEYSTORE_ERROR", known ? error.suggestions : []);
+      }
       return describe(credentials);
     },
 
@@ -364,22 +411,9 @@ export function createAuth(deps: AuthDeps): AuthService {
           unreadable = error.message;
         }
         const credentials = raw === undefined ? undefined : parseCredentials(raw);
-        const report: LogoutReport = { had_login: raw !== undefined || unreadable !== undefined, revoked: [], revoke_failed: {}, deleted: false };
-        if (credentials) {
-          const tokens: ["access_token" | "refresh_token", string | undefined][] = [
-            ["access_token", credentials.access_token],
-            ["refresh_token", credentials.refresh_token],
-          ];
-          for (const [kind, token] of tokens) {
-            if (!token) continue;
-            try {
-              await revokeToken(deps.endpoints.revoke, credentials.client_id, token, kind, fetchLike);
-              report.revoked.push(kind);
-            } catch (error) {
-              report.revoke_failed[kind] = scrub((error as Error).message, [credentials.access_token, credentials.refresh_token]);
-            }
-          }
-        } else if (report.had_login) {
+        const outcome = credentials ? await revokeAll(credentials) : { revoked: [], revoke_failed: {} };
+        const report: LogoutReport = { had_login: raw !== undefined || unreadable !== undefined, ...outcome, deleted: false };
+        if (!credentials && report.had_login) {
           report.revoke_failed["all"] = `nothing was revoked because the stored record could not be read: ${unreadable ?? "it is not one this version wrote"}`;
         }
         try {

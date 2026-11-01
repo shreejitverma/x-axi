@@ -156,7 +156,7 @@ export const HELP: Record<string, string> = {
   spend: "usage: x-axi spend\nLocal upper-bound estimate of API spend. No API call.",
   api: "usage: x-axi api </2/path?query>\nRaw GET for read endpoints without a command. Spend is not estimated. Writes are not available here.",
   setup: "usage: x-axi setup\nShows login state, the keystore, and the exact X portal steps. No API call.",
-  login: "usage: x-axi login [--client-id ID]\nSigns in to X in your browser with OAuth 2.0 PKCE and stores the login in the OS keystore. Run it yourself in a terminal, never through an agent. The client ID comes from --client-id, X_AXI_CLIENT_ID, or the config file, and is saved to the config file. Then fetches your account, about $0.01.",
+  login: "usage: x-axi login [--client-id ID]\nSigns in to X in your browser with OAuth 2.0 PKCE and stores the login in the OS keystore. Run it yourself in a terminal, never through an agent. The client ID comes from --client-id or the config file, and the flag's value is saved to the config file. Then fetches your account, about $0.01.",
   logout: "usage: x-axi logout\nRevokes the tokens at X and deletes the stored login. No approval dialog; deleting is reported even when revocation fails.",
   auth: "usage: x-axi auth status\nShows the account, scopes, access token expiry, and where the login is stored. Never shows a token. No API call.",
   update: "usage: x-axi update\nShows how to update from your git checkout. It installs nothing.",
@@ -644,9 +644,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       if (parsed.positional.length) throw usage("`login` takes only --client-id", [HELP["login"] as string]);
       const config = readConfig();
       const flag = parsed.flags.get("--client-id");
-      const env = process.env["X_AXI_CLIENT_ID"];
-      const clientId = flag !== undefined ? parseClientId(flag, "--client-id") : env ? parseClientId(env, "X_AXI_CLIENT_ID") : config.client_id;
-      if (!clientId) throw usage("no client ID: pass --client-id, set X_AXI_CLIENT_ID, or put client_id in the config file", [SETUP_HINT]);
+      const clientId = flag !== undefined ? parseClientId(flag, "--client-id") : config.client_id;
+      if (!clientId) throw usage("no client ID: pass --client-id, or put client_id in the config file", [SETUP_HINT]);
       const status = await deps.auth.login(clientId);
       // From here the login is stored, so every later problem is reported as a warning or with that fact attached.
       try {

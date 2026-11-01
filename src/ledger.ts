@@ -96,6 +96,8 @@ export function writeAccount(account: Account): void {
 
 /** After logout the cached account would name a login that no longer exists. The ledger and follow log stay. */
 export function clearAccount(): void {
+  const account = readAccount();
+  if (account) migrateFollowLog(account);
   try {
     unlinkSync(join(stateDir(), "account.json"));
   } catch (error) {
@@ -120,7 +122,7 @@ interface FollowFile {
 
 /**
  * Version 1 was a flat map of user ID to time, with no owner. Only account.json
- * can name that owner, so this must run before account.json is overwritten.
+ * can name that owner, so this must run before account.json is overwritten or deleted.
  * A missing or corrupt file is left for readFollows to handle.
  */
 function migrateFollowLog(owner: Account): void {

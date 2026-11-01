@@ -37,7 +37,7 @@ describe("PKCE", () => {
     });
     expect(SCOPES).toContain("offline.access");
     expect(SCOPES).toContain("tweet.moderate.write");
-    expect(SCOPES).not.toContain("follows.read");
+    expect(SCOPES).toContain("follows.read");
   });
 });
 
@@ -273,6 +273,67 @@ describe("login", () => {
     expect(m.writes).toEqual([]);
   });
 
+  it("answers a malformed request path and still accepts the real callback", async () => {
+    const m = memoryStore();
+    const statuses: number[] = [];
+    const { service } = auth(m.store, {
+      openBrowser: async (url) => {
+        statuses.push((await fetch("http://127.0.0.1:8711//")).status);
+        await x.browse(url);
+      },
+    });
+    await expect(service.login("client-id-1234")).resolves.toMatchObject({ logged_in: true });
+    expect(statuses).toEqual([400]);
+    expect(m.writes).toHaveLength(1);
+  });
+
+  it("stops before the browser when the keystore cannot be read", async () => {
+    for (const code of ["KEYSTORE_UNAVAILABLE", "KEYSTORE_LOCKED"]) {
+      const m = memoryStore();
+      const store: Keystore = { ...m.store, read: async () => { throw new AxiError("cannot read", code); } };
+      const { service, opened } = auth(store);
+      await expect(service.login("client-id-1234")).rejects.toMatchObject({ code });
+      expect(opened).toEqual([]);
+      expect(x.requests).toEqual([]);
+    }
+  });
+
+  it("replaces a record the backend cannot decode", async () => {
+    const m = memoryStore();
+    const store: Keystore = { ...m.store, read: async () => { throw new AxiError("not one this version wrote", "KEYSTORE_CORRUPT"); } };
+    await expect(auth(store).service.login("client-id-1234")).resolves.toMatchObject({ logged_in: true });
+    expect(m.writes).toHaveLength(1);
+  });
+
+  it("revokes the new tokens at X when the save fails, and says so", async () => {
+    const m = memoryStore(undefined, { failWrite: true });
+    const error = await rejection(auth(m.store).service.login("client-id-1234"));
+    expect(error.code).toBe("KEYSTORE_ERROR");
+    expect(error.message).toContain("disk on fire");
+    expect(error.message).toContain("the new tokens were revoked at X");
+    for (const secret of ALL_SECRETS) expect(error.message).not.toContain(secret);
+    expect(x.requests.filter((r) => r.path === "/revoke").map((r) => r.form["token"])).toEqual([ACCESS, REFRESH]);
+  });
+
+  it("says the new tokens may still be live when their revocation fails too", async () => {
+    x.revokeStatus = 503;
+    const error = await rejection(auth(memoryStore(undefined, { failWrite: true }).store).service.login("client-id-1234"));
+    expect(error.code).toBe("KEYSTORE_ERROR");
+    expect(error.message).toContain("could not all be revoked");
+    for (const secret of ALL_SECRETS) expect(error.message).not.toContain(secret);
+  });
+
+  it("revokes the new tokens at X when the credential lock cannot be taken", async () => {
+    writeFileSync(join(dir, "auth.lock"), "another process");
+    let clock = Date.now();
+    const m = memoryStore();
+    const error = await rejection(auth(m.store, { now: () => clock, sleep: async () => { clock += 10_000; } }).service.login("client-id-1234"));
+    expect(error.code).toBe("AUTH_LOCKED");
+    expect(error.suggestions).toEqual([expect.stringContaining("auth.lock")]);
+    expect(m.writes).toEqual([]);
+    expect(x.requests.filter((r) => r.path === "/revoke").map((r) => r.form["token"])).toEqual([ACCESS, REFRESH]);
+  });
+
   it("reports a busy callback port", async () => {
     const blocker = createServer();
     await new Promise<void>((r) => blocker.listen(8711, "127.0.0.1", r));
@@ -382,10 +443,12 @@ describe("access token", () => {
     expect(error.code).toBe("AUTH_REQUIRED");
     expect(error.message).toContain("could not be saved");
     expect(error.message).toContain("disk on fire");
+    expect(error.message).toContain("the new tokens were revoked at X");
     for (const secret of ALL_SECRETS) expect(error.message).not.toContain(secret);
+    expect(x.requests.filter((r) => r.path === "/revoke").map((r) => r.form["token"])).toEqual([ACCESS_2, REFRESH_2]);
     // The lock is free: a second attempt reaches X again instead of waiting out the lock.
     await expect(service.accessToken()).rejects.toMatchObject({ code: "AUTH_REQUIRED", message: expect.stringContaining("invalid_grant") });
-    expect(x.requests).toHaveLength(2);
+    expect(x.requests.filter((r) => r.path === "/token")).toHaveLength(2);
   });
 
   it("treats a rate limit or an unusable body from the token endpoint as X being unavailable, not as a rejected login", async () => {

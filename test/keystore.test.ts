@@ -1,8 +1,8 @@
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { keychainStore, runCommand, secretServiceStore, selectKeystore, type CommandResult, type CommandRunner, type CommandSpec } from "../src/keystore.js";
 
 const SECRET = '{"access_token":"SECRET_ACCESS","refresh_token":"SECRET_REFRESH"}';
@@ -182,22 +182,31 @@ describe.runIf(process.platform === "darwin" && process.env["X_AXI_TEST_KEYCHAIN
     await store.delete();
   });
 
-  it("shows only `security -i` in the process table during a write", async () => {
-    const seen: string[] = [];
-    const spy: CommandRunner = (spec) => {
-      const promise = runCommand(spec);
-      // Sample the process table while the write is in flight.
-      const sample = new Promise<void>((resolve) => {
-        execFile("/bin/ps", ["-axo", "args"], (_error, stdout) => {
-          seen.push(...stdout.split("\n").filter((l) => l.includes("/usr/bin/security")));
-          resolve();
+  it("shows only `security -i` in the process table while a write is held open", async () => {
+    let row: string | undefined;
+    let table = "";
+    const holding: CommandRunner = (spec) =>
+      new Promise((resolve, reject) => {
+        const child = spawn(spec.file, spec.args);
+        let stderr = "";
+        child.stdout.resume();
+        child.stderr.on("data", (chunk: Buffer) => (stderr += chunk.toString()));
+        child.on("error", reject);
+        child.on("close", (code) => resolve({ code, stdout: "", stderr, missing: false }));
+        // `security -i` waits for more input until stdin closes, so the sample below cannot miss it.
+        child.stdin.write(spec.stdin ?? "", () => {
+          execFile("/bin/ps", ["-axww", "-o", "pid=,args="], (error, stdout) => {
+            table = stdout;
+            row = stdout.split("\n").map((line) => line.trim()).find((line) => line.startsWith(`${String(child.pid)} `));
+            child.stdin.end();
+            if (error) reject(error);
+          });
         });
       });
-      return Promise.all([promise, sample]).then(([result]) => result);
-    };
-    await keychainStore(spy, keychain).write(SECRET);
-    expect(seen.join("\n")).not.toContain(ENCODED);
-    expect(seen.join("\n")).not.toContain("SECRET");
-    vi.restoreAllMocks();
+    await keychainStore(holding, keychain).write(SECRET);
+    expect(row).toMatch(/^\d+ \/usr\/bin\/security -i$/);
+    expect(table).not.toContain(ENCODED);
+    await expect(keychainStore(runCommand, keychain).read()).resolves.toBe(SECRET);
+    await keychainStore(runCommand, keychain).delete();
   });
 });

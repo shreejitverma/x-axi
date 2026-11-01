@@ -63,10 +63,13 @@ export function parseClientId(value: unknown, source: string): string {
   return value;
 }
 
-/** Only a loopback callback: the browser must come back to this machine, and X must match it exactly. */
+/** Only a 127.0.0.1 callback on an unprivileged port: the browser must come back to this machine, and X must match it exactly. */
 export function parseRedirectUri(value: unknown, source: string): string {
-  if (typeof value !== "string" || !/^http:\/\/(127\.0\.0\.1|localhost):\d{2,5}\/[\w/-]*$/.test(value)) {
-    throw new AxiError(`${source} redirect_uri must look like ${DEFAULT_REDIRECT_URI}`, "VALIDATION_ERROR");
+  const port = typeof value === "string" ? /^http:\/\/127\.0\.0\.1:([1-9]\d{3,4})\/[\w/-]*$/.exec(value)?.[1] : undefined;
+  if (port === undefined || Number(port) < 1024 || Number(port) > 65535) {
+    throw new AxiError(`${source} redirect_uri must be an http://127.0.0.1 URL with a port from 1024 to 65535, like ${DEFAULT_REDIRECT_URI}`, "VALIDATION_ERROR", [
+      "Register the same URI as the app's Callback URI in the X portal; X matches it character for character",
+    ]);
   }
-  return value;
+  return value as string;
 }

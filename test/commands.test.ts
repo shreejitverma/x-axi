@@ -63,7 +63,6 @@ beforeEach(() => {
   dir = mkdtempSync(join(tmpdir(), "x-axi-test-"));
   process.env["X_AXI_STATE_DIR"] = dir;
   process.env["X_AXI_CONFIG_DIR"] = join(dir, "config");
-  delete process.env["X_AXI_CLIENT_ID"];
 });
 afterEach(() => {
   delete process.env["X_AXI_STATE_DIR"];
@@ -1056,18 +1055,20 @@ describe("account commands", () => {
     expect(h.calls.map((c) => c.path)).toEqual(["/2/users/me"]);
   });
 
-  it("login falls back to the environment, then the config file, and refuses to run with none", async () => {
+  it("login falls back to the saved client ID, ignores the environment, and refuses to run with none", async () => {
     const login = vi.fn(async () => STATUS);
     const h = harness(() => PARENT);
     const commands = buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth({ login }) });
-    await expect(commands["login"]!([])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
-    expect(login).not.toHaveBeenCalled();
     process.env["X_AXI_CLIENT_ID"] = "from-environment";
+    try {
+      await expect(commands["login"]!([])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+      expect(login).not.toHaveBeenCalled();
+    } finally {
+      delete process.env["X_AXI_CLIENT_ID"];
+    }
+    await commands["login"]!(["--client-id", "client-id-1234"]);
     await commands["login"]!([]);
-    expect(login).toHaveBeenLastCalledWith("from-environment");
-    delete process.env["X_AXI_CLIENT_ID"];
-    await commands["login"]!([]);
-    expect(login).toHaveBeenLastCalledWith("from-environment");
+    expect(login).toHaveBeenLastCalledWith("client-id-1234");
     await expect(commands["login"]!(["--client-id", "bad id!"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
     await expect(commands["login"]!(["extra"])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
   });
@@ -1107,6 +1108,50 @@ describe("account commands", () => {
     expect(existsSync(join(dir, "account.json"))).toBe(false);
     expect(existsSync(join(dir, "ledger.jsonl"))).toBe(true);
     expect(h.calls).toEqual([]);
+  });
+
+  it("keeps a flat follow log with its owner when the cached account is cleared before a different login", async () => {
+    for (const leave of [
+      async (commands: ReturnType<typeof buildCommands>) => commands["login"]!(["--client-id", "client-id-1234"]),
+      async (commands: ReturnType<typeof buildCommands>) => {
+        await commands["logout"]!([]);
+        await commands["login"]!(["--client-id", "client-id-1234"]);
+      },
+    ]) {
+      writeFileSync(join(dir, "follows.json"), JSON.stringify({ "77": "2026-01-01T00:00:00.000Z" }));
+      writeFileSync(join(dir, "account.json"), JSON.stringify({ id: "2", username: "previous" }));
+      const h = harness(() => PARENT);
+      await leave(buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth() }));
+      const log = JSON.parse(readFileSync(join(dir, "follows.json"), "utf8")) as { accounts: Record<string, { following: Record<string, string> }> };
+      expect(Object.keys(log.accounts)).toEqual(["2"]);
+      expect(log.accounts["2"]!.following).toEqual({ "77": "2026-01-01T00:00:00.000Z" });
+      expect(JSON.parse(readFileSync(join(dir, "account.json"), "utf8"))).toEqual({ id: "1", username: "shreejit" });
+    }
+  });
+
+  it("setup uses a 127.0.0.1 redirect_uri on an unprivileged port", async () => {
+    for (const uri of ["http://127.0.0.1:1024/callback", "http://127.0.0.1:65535/callback"]) {
+      mkdirSync(join(dir, "config"), { recursive: true });
+      writeFileSync(join(dir, "config", "config.json"), JSON.stringify({ redirect_uri: uri }));
+      const h = harness(() => PARENT);
+      const out = (await h.commands["setup"]!([])) as { callback_url: string; steps: string[] };
+      expect(out.callback_url).toBe(uri);
+      expect(out.steps.join("\n")).toContain(uri);
+    }
+  });
+
+  it("setup and login refuse any other redirect_uri before starting a sign-in", async () => {
+    mkdirSync(join(dir, "config"), { recursive: true });
+    for (const uri of ["http://localhost:8711/callback", "http://127.0.0.1:99999/callback", "http://127.0.0.1:65536/callback", "http://127.0.0.1:80/callback", "http://127.0.0.1:1023/callback", "http://127.0.0.1/callback", "https://127.0.0.1:8711/callback", "http://127.0.0.1.example.com:8711/callback", 8711]) {
+      writeFileSync(join(dir, "config", "config.json"), JSON.stringify({ redirect_uri: uri }));
+      const login = vi.fn(async () => STATUS);
+      const h = harness(() => PARENT);
+      const commands = buildCommands({ client: { request: async () => ME }, approve: h.approve, auth: fakeAuth({ login }) });
+      const expected = { code: "VALIDATION_ERROR", suggestions: [expect.stringContaining("Callback URI")] };
+      await expect(commands["login"]!(["--client-id", "client-id-1234"])).rejects.toMatchObject(expected);
+      await expect(commands["setup"]!([])).rejects.toMatchObject(expected);
+      expect(login).not.toHaveBeenCalled();
+    }
   });
 
   it("logout reports a failed revocation next to the deletion", async () => {
