@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join, relative } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
-import { formatApproval, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
+import { formatApproval, linuxApprovalText, type ApprovalRequest, type ApprovalResult } from "../src/approve.js";
 import type { AuthService } from "../src/auth.js";
 import { buildCommands } from "../src/commands.js";
 
@@ -531,6 +531,47 @@ describe("post --media", () => {
     const ledger = readFileSync(join(dir, "ledger.jsonl"), "utf8").trim().split("\n").map((line) => JSON.parse(line) as { op: string; usd: number | null });
     expect(ledger.filter((e) => e.op === "media_upload").map((e) => e.usd)).toEqual([null, null, null]);
     expect(ledger.find((e) => e.op === "post")!.usd).toBe(0.015);
+  });
+});
+
+describe("--dry-run and the Linux dialog", () => {
+  const long = "word ".repeat(200).trim();
+  const short = "hello";
+  const parts = (count: number): string[] => Array.from({ length: count }, (_, i) => `part ${i + 1}`);
+  const posts = (c: Call): ApiResponse => (c.method === "GET" ? PARENT : c.path.includes("/dm_conversations") ? ok({ data: { dm_event_id: "9" } }) : ok({ data: { id: "60" } }, 201));
+
+  it.each([
+    ["a post that fits", ["post", short], false],
+    ["a post that does not", ["post", long], true],
+    ["a reply that does not", ["reply", "50", long], true],
+    ["a quote that does not", ["post", long, "--quote", "50"], true],
+    ["a DM that does not", ["dm", "send", "bob", long], true],
+    ["a thread of 8 short parts", ["thread", ...parts(8)], false],
+    ["a thread of 9 short parts", ["thread", ...parts(9)], true],
+  ])("agrees with the dialog the real run would open: %s", async (_name, argv, tooLong) => {
+    const [name, ...args] = argv as [string, ...string[]];
+    const real = harness(name === "dm" ? (c) => (c.path.includes("/by/username/") ? ok({ data: { id: "2", username: "bob" } }) : posts(c)) : posts);
+    await real.commands[name]!(args);
+    // The request the gate really sends decides, read by the code that picks the Linux refusal.
+    expect(linuxApprovalText(real.requests[0]!) === null).toBe(tooLong);
+
+    const dry = harness(name === "dm" ? (c) => (c.path.includes("/by/username/") ? ok({ data: { id: "2", username: "bob" } }) : posts(c)) : posts);
+    const out = await dry.commands[name]!([...args, "--dry-run"]);
+    expect(dry.approve).not.toHaveBeenCalled();
+    expect(dry.writes()).toEqual([]);
+    expect("linux_dialog" in (out["dry_run"] as Json)).toBe(tooLong);
+    expect((out["help"] as string[]).join(" ").includes("shorten the text")).toBe(tooLong);
+  });
+
+  it("names the refusal the real run gives", async () => {
+    const out = await harness(posts).commands["post"]!([long, "--dry-run"]);
+    expect((out["dry_run"] as Json)["linux_dialog"]).toContain("APPROVAL_TEXT_TOO_LONG");
+  });
+
+  it("does not report media with no text, because that dialog cannot refuse", async () => {
+    const h = harness(mediaApi());
+    const out = await h.commands["post"]!(["--media", file("photo.png", PNG_HEADER, 100), "--dry-run"]);
+    expect("linux_dialog" in (out["dry_run"] as Json)).toBe(false);
   });
 });
 

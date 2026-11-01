@@ -1,6 +1,6 @@
 import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
-import { counted, type ApprovalBody, type ApprovalResult, type Approver } from "./approve.js";
+import { counted, linuxApprovalText, type ApprovalBody, type ApprovalRequest, type ApprovalResult, type Approver } from "./approve.js";
 import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseMaxSpend, parseOutgoingText, parsePostId, shortenPath, usage, type Parsed } from "./args.js";
 import type { AuthService } from "./auth.js";
 import { configPath, DEFAULT_REDIRECT_URI, parseClientId, readConfig, writeConfig } from "./config.js";
@@ -141,8 +141,21 @@ function dryRunOutput(action: string, account: Account, wouldSend: Output[], usd
   return {
     dry_run: { action, account: `@${account.username}`, ...extra, would_send: wouldSend, write_est_cost: usd === null ? "unknown" : money(usd) },
     est_cost: money(spent),
-    help: ["Nothing was written to X and no approval was asked; est_cost is the reads made to validate this, which X bills", "Run it again without --dry-run to open the approval dialog"],
+    help: [
+      "Nothing was written to X and no approval was asked; est_cost is the reads made to validate this, which X bills",
+      "Run it again without --dry-run to open the approval dialog",
+      ...(extra["linux_dialog"] ? ["On Linux, shorten the text first"] : []),
+    ],
   };
+}
+
+function approvalRequest(action: string, account: Account, body: ApprovalBody, estCostUsd: number | null, context?: string): ApprovalRequest {
+  return { action, account: account.username, ...body, estCostUsd, ...(context ? { context } : {}) };
+}
+
+/** A dry run never opens the dialog, so it asks the same question the Linux dialog would. */
+function linuxDialogReport(request: ApprovalRequest): Output {
+  return linuxApprovalText(request) === null ? { linux_dialog: "too long: on Linux the real run refuses this with APPROVAL_TEXT_TOO_LONG and sends nothing; the macOS dialog has no such limit" } : {};
 }
 
 function includedUsers(body: Json): number {
@@ -168,7 +181,7 @@ export const HELP: Record<string, string> = {
   "follow-plan": "usage: x-axi follow-plan <handle> --out queue.json [--max-spend USD] [--include-protected]\nReads that account's following and your own following once, removes accounts you already follow and yourself, and writes a queue for follow-file. Protected accounts go to <out>.protected.json instead of the queue unless you pass --include-protected. Writes nothing to X. About $0.01 per account listed, $0.001 on your own list when you own the app, and $0.02 for the two lookups that give the totals. An estimate above $1 refuses without a --max-spend that covers it. Never overwrites a file, and writes no queue from an incomplete read.",
   post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
   reply: "usage: x-axi reply <post-id-or-url> <text> [--media FILE] [--dry-run]\nOpens an approval dialog showing the parent post. X allows this only on your own posts or when the author mentioned or quoted you. --media and --dry-run work as on `post`.",
-  thread: "usage: x-axi thread <first> <second> ... [--dry-run]\nPosts each part as a reply to the part before it, after one approval dialog showing every part and the total cost. Each part costs as a post of its own: about $0.015, or $0.20 with a URL. If a part fails it stops, never retries, and reports the posted IDs and that part's outcome. Do not rerun a stopped thread: the posted parts are public.",
+  thread: "usage: x-axi thread <first> <second> ... [--dry-run]\nPosts each part as a reply to the part before it, after one approval dialog showing every part and the total cost. The Linux dialog has room for about 8 short parts. Each part costs as a post of its own: about $0.015, or $0.20 with a URL. If a part fails it stops, never retries, and reports the posted IDs and that part's outcome. Do not rerun a stopped thread: the posted parts are public.",
   delete: "usage: x-axi delete <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. Already deleted is a no-op.",
   hide: "usage: x-axi hide <reply-id-or-url> [--dry-run]\nHides a reply on your own conversation, after approval.",
   unhide: "usage: x-axi unhide <reply-id-or-url> [--dry-run]",
@@ -317,13 +330,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     estCostUsd: number | null,
     context?: string,
   ): Promise<void> => {
-    const result: ApprovalResult = await deps.approve({
-      action,
-      account: account.username,
-      ...body,
-      estCostUsd,
-      ...(context ? { context } : {}),
-    });
+    const result: ApprovalResult = await deps.approve(approvalRequest(action, account, body, estCostUsd, context));
     if (result === "approved") return;
     const reasons: Record<Exclude<ApprovalResult, "approved">, [string, string, string?]> = {
       cancelled: ["the user cancelled this action; nothing was sent", "NOT_APPROVED"],
@@ -465,6 +472,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       ...(replyTo ? { reply: { in_reply_to_tweet_id: replyTo } } : {}),
       ...(quote ? { quote_tweet_id: quote } : {}),
     };
+    const approvalBody: ApprovalBody = text !== undefined ? { text } : { content: "No text; only the media named above is posted." };
     if (draft.dryRun) {
       const upload: Output[] = media
         ? [
@@ -477,9 +485,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       return dryRunOutput(action, account, [...upload, post], usd, recorded, {
         ...(media ? { media: describeMedia(media) } : {}),
         ...(context ? { context: truncate(context, false) } : {}),
+        ...linuxDialogReport(approvalRequest(action, account, approvalBody, usd, context)),
       });
     }
-    await gate(action, account, text !== undefined ? { text } : { content: "No text; only the media named above is posted." }, usd, context);
+    await gate(action, account, approvalBody, usd, context);
     const mediaId = media ? await uploadMedia(media) : undefined;
     let response: ApiResponse;
     try {
@@ -862,7 +871,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         const account = await refreshAccount();
         const target = await resolveUser(handle);
         if (parsed.flags.has(DRY_RUN)) {
-          return dryRunOutput(`DM to @${target.username}`, account, [{ method: "POST", path: `/2/dm_conversations/with/${target.id}/messages`, body: { text } }], RATES.dmCreate, recorded);
+          return dryRunOutput(`DM to @${target.username}`, account, [{ method: "POST", path: `/2/dm_conversations/with/${target.id}/messages`, body: { text } }], RATES.dmCreate, recorded, linuxDialogReport(approvalRequest(`DM to @${target.username}`, account, { text }, RATES.dmCreate)));
         }
         await gate(`DM to @${target.username}`, account, { text }, RATES.dmCreate);
         const check = `Check with \`x-axi dm read ${target.username}\``;
@@ -947,7 +956,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
           path: "/2/tweets",
           body: { text, ...(index ? { reply: { in_reply_to_tweet_id: `<id of part ${index}>` } } : {}) },
         }));
-        return dryRunOutput(action, account, wouldSend, total, recorded);
+        return dryRunOutput(action, account, wouldSend, total, recorded, linuxDialogReport(approvalRequest(action, account, { text: content }, total)));
       }
       // As text, not content: a dialog may clip content, but every part of a thread is published, so it must show whole or be refused.
       await gate(action, account, { text: content }, total);

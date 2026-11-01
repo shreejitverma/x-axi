@@ -28,6 +28,7 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
   A `thread` counts all its parts and their labels together.
 - `--dry-run` on any write prints the exact requests and cost with no dialog and no write.
   Reads needed to validate it are still billed.
+  If its output has `dry_run.linux_dialog`, the real run on Linux refuses the text with `APPROVAL_TEXT_TOO_LONG`, so on Linux offer the user a shorter version first.
 - `OUTCOME_UNKNOWN` means the write may have gone through.
   Do the check named in the error's help before any second attempt.
 - `REPLY_NOT_SUMMONED` means X refuses this reply through the API.
@@ -36,6 +37,8 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
   Never rerun it, because the posted parts are public; report it to the user.
 - `SPEND_CAP` means a read would cost more than the cap and nothing more was read.
   Show the user the cost and ask before passing the `--max-spend` the error names.
+  An export output with `stopped.code: SPEND_CAP` holds a partial read instead, and each continuation it prints can spend up to the cap again.
+  Show the user the spend so far and ask before running each continuation.
 - `MISSING_SCOPE` means the login predates `media.write`; tell the user to run `x-axi login` in their own terminal.
 - `AUTH_REQUIRED` means there is no usable login.
   Tell the user to run `x-axi login` in their own terminal; never run `login` or `logout` yourself, because login opens the user's browser and logout revokes their session.

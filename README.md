@@ -99,6 +99,7 @@ Follows you make elsewhere afterwards are not in it, and `follow-file` skips onl
 `x-axi thread "first" "second" ...` posts each part as a reply to the part before it, after one approval dialog that shows every part and the total cost.
 Each part is priced on its own, so a part with a URL costs $0.20.
 The whole thread must fit the same review limits as one text, 4000 characters and 40 lines of dialog, which is about 19 short parts.
+The Linux dialog has less room, about 8 short parts, because it may not scroll.
 If a part fails, nothing further is sent and nothing is retried.
 The output lists the posted IDs, the failed part, and whether it was `not posted` or `unknown`.
 Do not rerun a stopped thread, because the posted parts are public.
@@ -125,6 +126,7 @@ X checks limits again when media is attached, so a finished upload can still be 
 ### Dry runs
 
 `--dry-run` on any write runs the validation and prints the exact requests and the write's estimated cost, with no approval and no write.
+If the text would not fit the Linux dialog, on any platform the output carries `dry_run.linux_dialog`, because the real run on Linux refuses that text with `APPROVAL_TEXT_TOO_LONG`.
 Reads needed to validate it still happen and are billed, such as the account read, and the parent post on a reply, and they appear as `est_cost`.
 Media is inspected locally and no byte is uploaded.
 
