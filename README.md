@@ -36,9 +36,9 @@ The client ID is not a secret.
 If port 8711 is taken, set `redirect_uri` in the same file to another `http://127.0.0.1` URL with a port from 1024 to 65535.
 Register that exact URI as the Callback URI in the X portal as well, because X refuses a login whose callback differs; `x-axi setup` prints the URI in use.
 
-x-axi requests these scopes: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write dm.read dm.write offline.access`.
-The commands use all of them except `follows.read`, which is requested ahead of the queue builder so that you need not consent a second time.
-The raw `x-axi api` command can reach only endpoints those scopes cover.
+x-axi requests these scopes: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write media.write dm.read dm.write offline.access`.
+The commands use all of them, and the raw `x-axi api` command can reach only endpoints they cover.
+`media.write` is new: a login made before it was added works for everything except `--media`, which stops with `MISSING_SCOPE` before any spend or dialog until you run `x-axi login` again.
 
 ### Upgrading from a version that used xurl
 
@@ -56,14 +56,79 @@ The spend ledger, cached account, and follow log in `~/.local/state/x-axi` keep 
 
 | Group | Commands |
 |---|---|
-| Read | `me`, `timeline`, `mentions`, `replies`, `view`, `search`, `user`, `dm list`, `dm read`, `api`, `spend` |
-| Write, approval required | `post`, `reply`, `delete`, `hide`, `unhide`, `follow`, `unfollow`, `follow-file`, `dm send` |
+| Read | `me`, `timeline`, `mentions`, `replies`, `view`, `search`, `user`, `following`, `followers`, `dm list`, `dm read`, `api`, `spend` |
+| Write, approval required, each takes `--dry-run` | `post`, `reply`, `thread`, `delete`, `hide`, `unhide`, `repost`, `unrepost`, `follow`, `unfollow`, `follow-file`, `dm send` |
+| Plan, reads X and writes a local file | `follow-plan` |
 | Account | `setup`, `login`, `logout`, `auth status` |
 
 Reads use the account cached by `login`, the last `me`, or the last write, and timeline, mentions, and search output name it in `account`.
 `auth status` shows the account, scopes, access token expiry, and the storage backend without an API call, and never a token.
 `logout` revokes the access and refresh tokens at `https://api.x.com/2/oauth2/revoke`, then deletes the stored login and the cached account.
 If revocation fails the deletion still happens and the output says which revocation failed.
+
+### Reading following and followers
+
+`x-axi following [handle]` and `x-axi followers [handle]` show the list's total and one page, `--limit` from 1 to 1000, continued with `--next`.
+Without a handle they read your own list.
+`--all --out file.json` exports every page to a JSON array of `{id, username, name, protected}`.
+The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `follow-plan`, not from an export.
+A read estimated above $1 refuses before reading any page, and names the total and the cost, unless `--max-spend <usd>` covers it.
+`--all` with `--next` cannot be priced in advance, so it does not refuse up front; it stops at the cap, keeps what it read, and prints the command to continue.
+Every read sizes its page to what the cap still allows, so a wrong total from X cannot spend past it, and a page cut short this way still gives a `next_token`.
+If the cap, a rate limit, or an error stops an export after its first page, the file holds what was paid for and the output gives the `next_token` to continue into a new file.
+The export reports `complete: true` only if the read did not stop and X reported no partial errors.
+`--out` never overwrites a file, and it creates exports and queues readable only by you, because they can hold lists X shows only to approved viewers.
+
+### Building a follow queue
+
+`x-axi follow-plan <handle> --out queue.json` builds a queue for `follow-file`, and it is how "do nothing if I already follow the account" is met.
+It reads that account's following and your own following once, removes accounts you already follow and yourself, and writes the rest in the format `follow-file` reads.
+It sends nothing to X and asks for no approval, because it only reads.
+
+- The two lookups that give the totals cost about $0.02, and the output and any refusal state the cost.
+- Above $1 it refuses without a `--max-spend <usd>` that covers the estimate, before reading either list.
+- Protected accounts go to `queue.protected.json` rather than the queue, unless you pass `--include-protected`.
+- A read of either list that stops early writes no queue, and neither do partial errors on your own list, because such a queue could hold accounts you already follow.
+- If X lists fewer of your follows than its own count, or reports partial errors on the other account's list, the queue is still written and the output carries a warning.
+
+The queue is correct when it is built.
+Follows you make elsewhere afterwards are not in it, and `follow-file` skips only accounts this login followed through x-axi.
+
+### Threads
+
+`x-axi thread "first" "second" ...` posts each part as a reply to the part before it, after one approval dialog that shows every part and the total cost.
+Each part is priced on its own, so a part with a URL costs $0.20.
+The whole thread must fit the same review limits as one text, 4000 characters and 40 lines of dialog, which is about 19 short parts.
+The Linux dialog has less room, about 8 short parts, because it may not scroll.
+If a part fails, nothing further is sent and nothing is retried.
+The output lists the posted IDs, the failed part, and whether it was `not posted` or `unknown`.
+Do not rerun a stopped thread, because the posted parts are public.
+
+### Media
+
+`post --media <file>` and `reply <id> <text> --media <file>` attach one file; the text may be left out.
+
+| Type | Detected from the file's bytes | Limit checked locally |
+|---|---|---|
+| Image | JPEG, PNG, WebP | 5 MiB |
+| Animated GIF | GIF | 15 MiB |
+| Video | MP4, MOV, WebM | 16 GiB |
+
+A file's extension must agree with its bytes.
+MP4 means a plain MP4 brand and WebM means the WebM DocType, so HEIC, AVIF, M4A, 3GP, and other Matroska files are refused.
+These checks run before any API call, and the dialog shows the file's path, type, and size, eliding the middle of a path over 120 characters.
+The upload runs only after approval, through `POST /2/media/upload/initialize`, then `POST /2/media/upload/{id}/append` in multipart chunks of at most 5,000,000 bytes indexed from 0, then `POST /2/media/upload/{id}/finalize`, then `GET /2/media/upload` while X reports processing, for at most 10 minutes.
+A failed chunk stops the upload and is not retried, and the error says nothing was posted.
+A file that changes after approval is refused.
+x-axi does not know a video's duration or the account's Premium status, so X judges those: 8 GB and 20 minutes by default, 16 GB and 125 minutes with Premium or verification.
+X checks limits again when media is attached, so a finished upload can still be refused at the post, as the error then says.
+
+### Dry runs
+
+`--dry-run` on any write runs the validation and prints the exact requests and the write's estimated cost, with no approval and no write.
+If the text would not fit the Linux dialog, on any platform the output carries `dry_run.linux_dialog`, because the real run on Linux refuses that text with `APPROVAL_TEXT_TOO_LONG`.
+Reads needed to validate it still happen and are billed, such as the account read, and the parent post on a reply, and they appear as `est_cost`.
+Media is inspected locally and no byte is uploaded.
 
 ## Where the login lives
 
@@ -122,21 +187,24 @@ A failed response that might have been applied returns `OUTCOME_UNKNOWN`.
 
 ## X platform limits
 
-Checked against the [changelog](https://docs.x.com/changelog) and [pricing](https://docs.x.com/x-api/getting-started/pricing) on 2026-10-31, and the [OAuth 2.0 documentation](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code) on 2026-11-01.
+Checked against the [changelog](https://docs.x.com/changelog), [pricing](https://docs.x.com/x-api/getting-started/pricing), [OAuth 2.0 documentation](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code), and [create post reference](https://docs.x.com/x-api/posts/create-post) on 2026-11-01.
 
 - API replies work only on your own posts, or when the post's author mentioned or quoted you.
   Otherwise `reply` returns `REPLY_NOT_SUMMONED` with a browser link holding your text.
-- The changelog says liking, following, and quote-posting were removed from self-serve plans.
-  A live follow on a Pay-per-use app still succeeded on 2026-10-31, so following may stop working without notice; liking and quote-posting are untested.
+- The April 16, 2026 changelog entry says following, likes, and quote-posts were removed from all self-serve tiers.
+  A live follow on a Pay-per-use app still succeeded on 2026-10-31, so following may stop working without notice.
+- x-axi has no `like` or `unlike`, because of that entry.
+- `post --quote` exists, but the create post reference says `quote_tweet_id` requires an Enterprise plan, so expect `FORBIDDEN` on self-serve; it is untested live.
+- `repost` and `unrepost` use documented endpoints that the removal entry does not name, and the [API overview](https://docs.x.com/x-api/overview) says its endpoints are on pay-per-use, though it also lists likes.
+  No page names reposts on pay-per-use specifically and the pricing page has no line for them, so they are untested and unpriced.
 - [Following](https://help.x.com/en/using-x/x-follow-limit) is limited to 400 per day and 50 per 15 minutes, and X may lock accounts for aggressive following.
   `follow-file` asks once per batch, follows every 20 seconds, caps itself at 400 in 24 hours, and stops at the first error.
   Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.
 - `follow-file` treats an account as already followed only if the logged-in account followed it through x-axi, and it does not read X's following list, because each listed account is billed.
-  Filter a queue against your real following list when you build it, or those accounts are followed and billed again.
+  Build the queue with `x-axi follow-plan`, which removes accounts you already follow, or those accounts are followed and billed again.
   The approval dialog shows usernames from the file, which are not verified with X; the follow goes to each entry's `id`.
 - `replies` and `search` use recent search, which covers 7 days.
 - `dm` uses the legacy DM endpoints and does not cover encrypted XChat conversations.
-- Media upload is not implemented yet.
 - The OAuth documentation does not say whether refresh tokens rotate, so x-axi treats each as single-use and stores whatever X returns.
 
 ## Platform support for writes
@@ -158,10 +226,11 @@ On Linux:
 - The dialog holds about 25 lines of 50 columns.
   That is a conservative estimate rather than a measurement of the window, and macOS does not apply it.
 - A word or URL wider than a line is split in the dialog with a `↵` mark at each break, and the dialog counts the breaks; the text sent to X is unchanged.
-- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or a file path, is cut to fit with a marker giving its full character count, and never blocks the write.
+- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or the path of a `follow-file` queue, is cut to fit with a marker giving its full character count, and never blocks the write.
 - Text to send must be shown in full to be approved, so text too long to fit once wrapped returns `APPROVAL_TEXT_TOO_LONG` instead of a dialog.
   The text itself has room for about 19 rows, or about 950 characters of plain text, because the rest of the dialog is held for its other lines and any context.
   The rows of a split URL count toward that limit.
+  A `--media` path is shown in the dialog's first lines, so it takes from that room: about 17 rows are left with a short path, and about 13 with a 120-character path.
 - A `zenity` that cannot open its display exits with the same code as Cancel, so x-axi reads its error output and returns `APPROVAL_UNAVAILABLE` rather than reporting a cancel nobody made.
 - The gate is weaker than on macOS.
   Any process running as you can click in an X11 dialog, or set `DISPLAY` to an X server it controls and click there.
@@ -177,7 +246,10 @@ CI installs the standalone pnpm build described under [Install](#install).
 Each priced result shows `est_cost`, and `x-axi spend` totals them locally.
 A write's `est_cost` is the write alone; the lookups before its dialog appear only in `spend`.
 These are upper bounds, because X does not re-bill a resource within a UTC day and may change its rates.
-The `hide`, `unhide`, and `api` calls have no estimate, so they add nothing to these totals and `spend` counts them in `unpriced_calls_30d`.
+The `hide`, `unhide`, `repost`, `unrepost`, media upload, and `api` calls have no estimate, so they add nothing to these totals and `spend` counts them in `unpriced_calls_30d`.
+The [pricing page](https://docs.x.com/x-api/getting-started/pricing) lists no price for media upload or reposting, so a post with media shows the price of the post alone.
+Following and followers lists cost $0.01 per account.
+Your own list uses the $0.001 Owned Read rate, which X gives only when the login also owns the app, so under another app's login the estimate is low.
 A write with an unknown outcome is counted, because it may have been billed.
 `login` ends with one account read, about $0.01, so the approval dialogs can name the account the token belongs to.
 The console is the billing truth, and its spend limit is the only hard cap.

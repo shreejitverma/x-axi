@@ -1,13 +1,14 @@
 import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
-import { counted, type ApprovalBody, type ApprovalResult, type Approver } from "./approve.js";
-import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseOutgoingText, parsePostId, usage } from "./args.js";
+import { counted, linuxApprovalText, type ApprovalBody, type ApprovalRequest, type ApprovalResult, type Approver } from "./approve.js";
+import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseMaxSpend, parseOutgoingText, parsePostId, shortenPath, usage, type Parsed } from "./args.js";
 import type { AuthService } from "./auth.js";
 import { configPath, DEFAULT_REDIRECT_URI, parseClientId, readConfig, writeConfig } from "./config.js";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { assertFollowLogReadable, clearAccount, DAY_MS, logFollow, logFollowAttempt, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
+import { chunkCount, describeMedia, inspectMedia, MEDIA_CHUNK_BYTES, readChunks, type MediaFile } from "./media.js";
 import { SCOPES } from "./oauth.js";
-import { estimatePostCost, RATES } from "./rates.js";
+import { DEFAULT_SPEND_CAP_USD, estimatePostCost, RATES } from "./rates.js";
 
 export interface Deps {
   client: XClient;
@@ -19,12 +20,19 @@ export interface Deps {
 // X allows 50 follows per 15 minutes and 400 per day. These stay under both.
 const FOLLOW_INTERVAL_MS = 20_000;
 const FOLLOW_DAILY_CAP = 400;
+// Sums of per-row rates carry float error, so 0.01 + 137 * 0.01 prints as 1.38 but compares above it.
+const CAP_SLACK_USD = 1e-9;
 const FOLLOW_BATCH_DEFAULT = 100;
+
+// GET /2/users/{id}/following and /followers take max_results from 1 to 1000.
+const USER_PAGE_MAX = 1000;
+const MEDIA_WAIT_LIMIT_SECONDS = 600;
+const MEDIA_ID_PLACEHOLDER = "<media id from finalize>";
+const DRY_RUN = "--dry-run";
 
 export type Output = Record<string, unknown>;
 
 const PREVIEW = 280;
-const MAX_SHOWN_PATH = 120;
 const POST_FIELDS = "tweet.fields=created_at,public_metrics,conversation_id,note_tweet,entities&expansions=author_id&user.fields=username";
 
 // ---- reading -----------------------------------------------------------------
@@ -75,14 +83,6 @@ function usernames(body: Json): Map<string, string> {
 function fullText(post: Json): string {
   const note = post["note_tweet"] as { text?: string } | undefined;
   return note?.text ?? String(post["text"] ?? "");
-}
-
-/** Keeps both ends of a path, because the name of the file and where it sits are what identify it. */
-function shortenPath(path: string): string {
-  const characters = Array.from(path);
-  if (characters.length <= MAX_SHOWN_PATH) return path;
-  const end = MAX_SHOWN_PATH / 2;
-  return `${characters.slice(0, end).join("")} ...[${characters.length} characters in full]... ${characters.slice(-end).join("")}`;
 }
 
 function truncate(text: string, full: boolean): string {
@@ -136,6 +136,28 @@ function listOutput(key: string, rows: Row[], body: Json, emptyMessage: string, 
   };
 }
 
+/** What a write would do. est_cost stays what was really spent, as everywhere else: here, the reads that validated it. */
+function dryRunOutput(action: string, account: Account, wouldSend: Output[], usd: number | null, spent: number, extra: Output = {}): Output {
+  return {
+    dry_run: { action, account: `@${account.username}`, ...extra, would_send: wouldSend, write_est_cost: usd === null ? "unknown" : money(usd) },
+    est_cost: money(spent),
+    help: [
+      "Nothing was written to X and no approval was asked; est_cost is the reads made to validate this, which X bills",
+      "Run it again without --dry-run to open the approval dialog",
+      ...(extra["linux_dialog"] ? ["On Linux, shorten the text first"] : []),
+    ],
+  };
+}
+
+function approvalRequest(action: string, account: Account, body: ApprovalBody, estCostUsd: number | null, context?: string): ApprovalRequest {
+  return { action, account: account.username, ...body, estCostUsd, ...(context ? { context } : {}) };
+}
+
+/** A dry run never opens the dialog, so it asks the same question the Linux dialog would. */
+function linuxDialogReport(request: ApprovalRequest): Output {
+  return linuxApprovalText(request) === null ? { linux_dialog: "too long: on Linux the real run refuses this with APPROVAL_TEXT_TOO_LONG and sends nothing; the macOS dialog has no such limit" } : {};
+}
+
 function includedUsers(body: Json): number {
   return usernames(body).size;
 }
@@ -153,15 +175,21 @@ export const HELP: Record<string, string> = {
   view: "usage: x-axi view <post-id-or-url> [--full]",
   search: "usage: x-axi search <query> [--limit 10-100] [--next TOKEN] [--full]\nRecent search, last 7 days. Each result costs about $0.005.",
   user: "usage: x-axi user <handle>",
-  dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text>   (needs your approval)\nEncrypted XChat conversations are not covered.",
-  post: "usage: x-axi post <text>\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL.",
-  reply: "usage: x-axi reply <post-id-or-url> <text>\nOpens an approval dialog showing the parent post. X allows this only on your own posts or when the author mentioned or quoted you.",
-  delete: "usage: x-axi delete <post-id-or-url>\nOpens an approval dialog showing the post. Already deleted is a no-op.",
-  hide: "usage: x-axi hide <reply-id-or-url>\nHides a reply on your own conversation, after approval.",
-  unhide: "usage: x-axi unhide <reply-id-or-url>",
-  follow: "usage: x-axi follow <handle>\nOpens an approval dialog. Costs about $0.015.",
-  unfollow: "usage: x-axi unfollow <handle>\nOpens an approval dialog. Costs about $0.01.",
-  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. One follow every 20 seconds, at most 400 in 24 hours, default 100 per run. Stops at the first error. Rerun to continue. Skips only accounts this login followed through x-axi, so filter the file against your real following list when you build it. Usernames are shown as the file gives them.",
+  dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text> [--dry-run]   (needs your approval)\nEncrypted XChat conversations are not covered.",
+  following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and if X's total proves too low, a page is cut short at the cap and --all stops there. --all with --next cannot be priced in advance, so it always stops at the cap and prints how to continue. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
+  followers: "usage: x-axi followers [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi followers [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts following a user; yours without a handle. Costs, caps, and the unfiltered --all export as for `following`.",
+  "follow-plan": "usage: x-axi follow-plan <handle> --out queue.json [--max-spend USD] [--include-protected]\nReads that account's following and your own following once, removes accounts you already follow and yourself, and writes a queue for follow-file. Protected accounts go to <out>.protected.json instead of the queue unless you pass --include-protected. Writes nothing to X. About $0.01 per account listed, $0.001 on your own list when you own the app, and $0.02 for the two lookups that give the totals. An estimate above $1 refuses without a --max-spend that covers it. Never overwrites a file. Writes no queue if either read stops early or your own list has partial errors; partial errors on their list, or X listing fewer of your follows than its count, still write the queue with a warning.",
+  post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
+  reply: "usage: x-axi reply <post-id-or-url> <text> [--media FILE] [--dry-run]\nOpens an approval dialog showing the parent post. X allows this only on your own posts or when the author mentioned or quoted you. --media and --dry-run work as on `post`.",
+  thread: "usage: x-axi thread <first> <second> ... [--dry-run]\nPosts each part as a reply to the part before it, after one approval dialog showing every part and the total cost. The Linux dialog has room for about 8 short parts. Each part costs as a post of its own: about $0.015, or $0.20 with a URL. If a part fails it stops, never retries, and reports the posted IDs and that part's outcome. Do not rerun a stopped thread: the posted parts are public.",
+  delete: "usage: x-axi delete <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. Already deleted is a no-op.",
+  hide: "usage: x-axi hide <reply-id-or-url> [--dry-run]\nHides a reply on your own conversation, after approval.",
+  unhide: "usage: x-axi unhide <reply-id-or-url> [--dry-run]",
+  repost: "usage: x-axi repost <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. X's pricing page lists no price for reposting, so the cost is unknown. No docs page names reposts on pay-per-use specifically, so X may refuse this.",
+  unrepost: "usage: x-axi unrepost <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. The cost is unknown, as for `repost`.",
+  follow: "usage: x-axi follow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.015.",
+  unfollow: "usage: x-axi unfollow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.01.",
+  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. One follow every 20 seconds, at most 400 in 24 hours, default 100 per run. Stops at the first error. Rerun to continue. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
   spend: "usage: x-axi spend\nLocal upper-bound estimate of API spend. No API call.",
   api: "usage: x-axi api </2/path?query>\nRaw GET for read endpoints without a command. Spend is not estimated. Writes are not available here.",
   setup: "usage: x-axi setup\nShows login state, the keystore, and the exact X portal steps. No API call.",
@@ -231,8 +259,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   };
 
   /** Writes call this directly so the approval dialog names the account the token really belongs to. */
-  const refreshAccount = async (): Promise<Account> => {
-    const response = await get(deps, "/2/users/me");
+  const refreshAccount = async (query = ""): Promise<Account & { data: Json }> => {
+    const response = await get(deps, `/2/users/me${query}`);
     const data = response.body["data"] as Json | undefined;
     if (!data?.["id"] || !data["username"]) {
       throw new AxiError(`X returned no account: ${errorDetail(response.body)}`, "X_UNAVAILABLE");
@@ -240,7 +268,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     const account = { id: String(data["id"]), username: String(data["username"]) };
     writeAccount(account);
     spend("me", RATES.userRead);
-    return account;
+    return { ...account, data };
   };
 
   const me = async (): Promise<Account> => readAccount() ?? refreshAccount();
@@ -302,13 +330,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     estCostUsd: number | null,
     context?: string,
   ): Promise<void> => {
-    const result: ApprovalResult = await deps.approve({
-      action,
-      account: account.username,
-      ...body,
-      estCostUsd,
-      ...(context ? { context } : {}),
-    });
+    const result: ApprovalResult = await deps.approve(approvalRequest(action, account, body, estCostUsd, context));
     if (result === "approved") return;
     const reasons: Record<Exclude<ApprovalResult, "approved">, [string, string, string?]> = {
       cancelled: ["the user cancelled this action; nothing was sent", "NOT_APPROVED"],
@@ -343,7 +365,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   const send = async (
     method: Method,
     path: string,
-    body: Json | undefined,
+    body: Json | FormData | undefined,
     op: string,
     usd: number | null,
     check: string,
@@ -380,19 +402,112 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
   };
 
-  const createPost = async (text: string, replyTo: string | undefined, account: Account, usd: number, context?: string): Promise<Output> => {
+  const pause = (ms: number): Promise<void> => (deps.sleep ?? ((wait: number) => new Promise<void>((done) => setTimeout(done, wait))))(ms);
+
+  const prepareMedia = async (parsed: Parsed): Promise<MediaFile | undefined> => {
+    const file = parsed.flags.get("--media");
+    if (file === undefined) return undefined;
+    const media = inspectMedia(String(file));
+    const { scopes } = await deps.auth.status();
+    if (scopes && !scopes.includes("media.write")) {
+      throw new AxiError("this login has no media.write scope, because it was granted before x-axi asked for it", "MISSING_SCOPE", ["Run `x-axi login` in your own terminal to grant it; nothing was sent"]);
+    }
+    return media;
+  };
+
+  const waitForMedia = async (id: string, finalized: Json, name: string): Promise<void> => {
+    let body = finalized;
+    let waited = 0;
+    for (;;) {
+      const data = body["data"] as Json | undefined;
+      if (!data) throw new AxiError(`X returned no media status: ${errorDetail(body)}`, "X_UNAVAILABLE");
+      const info = data["processing_info"] as { state?: string; check_after_secs?: number } | undefined;
+      if (!info || info.state === "succeeded") return;
+      if (info.state === "failed") throw new AxiError(`X could not process ${displayText(name)}: ${errorDetail(body)}`, "MEDIA_FAILED");
+      if (info.state !== "pending" && info.state !== "in_progress") throw new AxiError(`X reported media state ${String(info.state)}`, "X_UNAVAILABLE");
+      const wait = Math.min(Math.max(Number(info.check_after_secs) || 5, 1), 60);
+      if (waited + wait > MEDIA_WAIT_LIMIT_SECONDS) throw new AxiError(`X was still processing ${displayText(name)} after ${waited} seconds`, "MEDIA_TIMEOUT");
+      await pause(wait * 1000);
+      waited += wait;
+      body = (await get(deps, `/2/media/upload?command=STATUS&media_id=${id}`)).body;
+      spend("media_status", null);
+    }
+  };
+
+  /** Runs only after approval. Every failure here happens before the post, so its outcome is known: nothing was posted. */
+  const uploadMedia = async (media: MediaFile): Promise<string> => {
+    const op = "media_upload";
+    try {
+      const init = await send("POST", "/2/media/upload/initialize", { media_type: media.mediaType, total_bytes: media.size, media_category: media.category }, op, null, "");
+      const id = (init.body["data"] as Json | undefined)?.["id"];
+      if (typeof id !== "string" || !/^\d{1,19}$/.test(id)) throw new AxiError(`X returned no media ID: ${errorDetail(init.body)}`, "X_UNAVAILABLE");
+      let index = 0;
+      for (const chunk of readChunks(media)) {
+        const form = new FormData();
+        form.append("segment_index", String(index));
+        form.append("media", new Blob([new Uint8Array(chunk)]), media.name);
+        await send("POST", `/2/media/upload/${id}/append`, form, op, null, "");
+        index += 1;
+      }
+      const finalized = await send("POST", `/2/media/upload/${id}/finalize`, undefined, op, null, "");
+      await waitForMedia(id, finalized.body, media.name);
+      return id;
+    } catch (error) {
+      const known = error instanceof AxiError;
+      const reason = known ? error.message.replace(/; the write may or may not have gone through$/, "") : String(error);
+      const code = !known || error.code === "OUTCOME_UNKNOWN" ? "MEDIA_UPLOAD_FAILED" : error.code;
+      const suggestions = known && error.code !== "OUTCOME_UNKNOWN" ? error.suggestions : [];
+      throw new AxiError(`the media upload stopped, so nothing was posted: ${reason}`, code, suggestions);
+    }
+  };
+
+  const createPost = async (draft: { text?: string; replyTo?: string; quote?: string; media?: MediaFile; context?: string; dryRun: boolean }, account: Account, usd: number): Promise<Output> => {
+    const { text, replyTo, quote, media, context } = draft;
     const op = replyTo ? "reply" : "post";
     const check = "Check with `x-axi timeline`";
-    await gate(replyTo ? "Reply" : "Post", account, { text }, usd, context);
-    const response = await send(
-      "POST",
-      "/2/tweets",
-      { text, ...(replyTo ? { reply: { in_reply_to_tweet_id: replyTo } } : {}) },
-      op,
-      usd,
-      check,
-      replyTo ? { replyTo, text } : {},
-    );
+    const verb = replyTo ? "Reply" : quote ? "Quote post" : "Post";
+    const action = media ? `${verb} with media ${describeMedia(media)}, upload price not listed by X,` : verb;
+    const fields: Json = {
+      ...(text !== undefined ? { text } : {}),
+      ...(replyTo ? { reply: { in_reply_to_tweet_id: replyTo } } : {}),
+      ...(quote ? { quote_tweet_id: quote } : {}),
+    };
+    const approvalBody: ApprovalBody = text !== undefined ? { text } : { content: "No text; only the media named above is posted." };
+    if (draft.dryRun) {
+      const upload: Output[] = media
+        ? [
+            { method: "POST", path: "/2/media/upload/initialize", body: { media_type: media.mediaType, total_bytes: media.size, media_category: media.category } },
+            { method: "POST", path: `/2/media/upload/${MEDIA_ID_PLACEHOLDER}/append`, chunks: chunkCount(media.size), chunk_bytes: `at most ${MEDIA_CHUNK_BYTES}` },
+            { method: "POST", path: `/2/media/upload/${MEDIA_ID_PLACEHOLDER}/finalize` },
+          ]
+        : [];
+      const post = { method: "POST", path: "/2/tweets", body: { ...fields, ...(media ? { media: { media_ids: [MEDIA_ID_PLACEHOLDER] } } : {}) } };
+      return dryRunOutput(action, account, [...upload, post], usd, recorded, {
+        ...(media ? { media: describeMedia(media) } : {}),
+        ...(context ? { context: truncate(context, false) } : {}),
+        ...linuxDialogReport(approvalRequest(action, account, approvalBody, usd, context)),
+      });
+    }
+    await gate(action, account, approvalBody, usd, context);
+    const mediaId = media ? await uploadMedia(media) : undefined;
+    let response: ApiResponse;
+    try {
+      response = await send(
+        "POST",
+        "/2/tweets",
+        { ...fields, ...(mediaId ? { media: { media_ids: [mediaId] } } : {}) },
+        op,
+        usd,
+        check,
+        replyTo ? { replyTo, text: text ?? "" } : {},
+      );
+    } catch (error) {
+      if (!(error instanceof AxiError)) throw error;
+      const hints: string[] = [];
+      if (quote && (error.code === "FORBIDDEN" || error.code === "APP_NOT_ENROLLED")) hints.push("X's create-post docs say quote-posting needs an Enterprise plan and is not on self-serve tiers");
+      if (mediaId) hints.push(`Media ${mediaId} finished uploading; X checks its limits again when it is attached to a post, including a video's duration`);
+      throw hints.length ? new AxiError(error.message, error.code, [...error.suggestions, ...hints]) : error;
+    }
     const data = response.body["data"] as Json | undefined;
     if (!data?.["id"]) throw outcomeUnknown("X accepted the request but returned no post ID", check);
     return {
@@ -401,19 +516,290 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     };
   };
 
+  type ListSide = "following" | "followers";
+  interface ListTarget extends Account {
+    total: number | undefined;
+    rate: number;
+  }
+  interface UserRow extends Output {
+    id: string;
+    username: string;
+    name: string;
+    protected: boolean;
+  }
+  interface ReadAll {
+    rows: UserRow[];
+    partial: number;
+    next?: string;
+    stopped?: AxiError;
+  }
+
+  const listCount = (data: Json, side: ListSide): number | undefined => {
+    const count = (data["public_metrics"] as Json | undefined)?.[`${side}_count`];
+    return typeof count === "number" ? count : undefined;
+  };
+
+  /** Your own list is priced at the Owned Read rate, which X gives when the login also owns the app. */
+  const listTarget = async (handle: string | undefined, side: ListSide): Promise<ListTarget> => {
+    if (!handle) {
+      const account = await refreshAccount("?user.fields=public_metrics");
+      return { id: account.id, username: account.username, total: listCount(account.data, side), rate: RATES.ownedRead };
+    }
+    const known = readAccount();
+    const response = await get(deps, `/2/users/by/username/${handle}?user.fields=public_metrics`);
+    const data = foundUser(response.body, handle);
+    spend("user", RATES.userRead);
+    const id = String(data["id"]);
+    return { id, username: String(data["username"]), total: listCount(data, side), rate: id === known?.id ? RATES.ownedRead : RATES.followListRead };
+  };
+
+  const userPage = async (target: ListTarget, side: ListSide, size: number, token: string | undefined, op: string): Promise<{ rows: UserRow[]; next?: string; partial: number; body: Json }> => {
+    const { body } = await get(deps, `/2/users/${target.id}/${side}?${pagedQuery(size, token)}&user.fields=protected`);
+    const meta = body["meta"] as { next_token?: string; result_count?: number } | undefined;
+    if (!Array.isArray(body["data"]) && meta?.result_count === undefined) throw unreadable(`the ${side} of @${target.username}`, body);
+    const rows = ((body["data"] as Json[] | undefined) ?? []).map((user) => ({
+      id: String(user["id"]),
+      username: String(user["username"]),
+      name: String(user["name"] ?? ""),
+      protected: user["protected"] === true,
+    }));
+    spend(op, rows.length * target.rate);
+    return { rows, ...(meta?.next_token ? { next: meta.next_token } : {}), partial: Array.isArray(body["errors"]) ? (body["errors"] as Json[]).length : 0, body };
+  };
+
+  /** How many rows the cap still allows, so even a wrong total from X cannot spend past it. */
+  const rowsWithinCap = (target: ListTarget, cap: number): number => Math.floor((cap - recorded + CAP_SLACK_USD) / target.rate);
+
+  /** A failure keeps what was already paid for. */
+  const readAllUsers = async (target: ListTarget, side: ListSide, op: string, cap: number, start?: string): Promise<ReadAll> => {
+    const out: ReadAll = { rows: [], partial: 0 };
+    let token = start;
+    for (;;) {
+      const room = rowsWithinCap(target, cap);
+      if (room < 1) return { ...out, ...(token ? { next: token } : {}), stopped: new AxiError(`the ${money(cap)} spend cap was reached`, "SPEND_CAP", ["Raise --max-spend to read further"]) };
+      let page;
+      try {
+        page = await userPage(target, side, Math.min(USER_PAGE_MAX, room), token, op);
+      } catch (error) {
+        if (!(error instanceof AxiError)) throw error;
+        return { ...out, ...(token ? { next: token } : {}), stopped: error };
+      }
+      out.rows.push(...page.rows);
+      out.partial += page.partial;
+      if (!page.next) return out;
+      token = page.next;
+      if (!page.rows.length) return { ...out, next: token, stopped: new AxiError("X returned an empty page with a next token", "X_UNAVAILABLE") };
+    }
+  };
+
+  const overCap = (usd: number, cap: number): boolean => usd > cap + CAP_SLACK_USD;
+
+  const spendCapError = (what: string, estimate: number, cap: number): AxiError => {
+    const needed = (Math.ceil((estimate - CAP_SLACK_USD) * 100) / 100).toFixed(2);
+    return new AxiError(`${what} would cost about ${money(estimate)}, above the ${money(cap)} cap; nothing more was read`, "SPEND_CAP", [
+      `Pass --max-spend ${needed} if that is acceptable`,
+      `Finding that out cost ${money(recorded)} in lookups`,
+    ]);
+  };
+
+  const refuseExisting = (path: string): void => {
+    if (existsSync(path)) throw usage(`${path} already exists; choose a new file`);
+  };
+
+  /** Fails before any paid page if the file cannot be created, so paid results always have somewhere to go. */
+  const reserveFile = (path: string): void => {
+    try {
+      writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+    } catch (error) {
+      throw usage(`cannot create ${path}: ${(error as Error).message}; choose a new file`);
+    }
+  };
+
+  const writeJson = (path: string, value: unknown): void => {
+    writeFileSync(path, `${JSON.stringify(value, null, 2)}\n`, { mode: 0o600 });
+  };
+
+  const listUsers = async (args: string[], side: ListSide): Promise<Output> => {
+    const parsed = parseArgs(args, side, ["--limit", "--next", "--out", "--max-spend"], ["--all"]);
+    const positional = onePositional(parsed, side);
+    const handle = positional === undefined ? undefined : parseHandle(positional);
+    const limit = parseLimit(parsed, 20, 1, USER_PAGE_MAX);
+    const maxSpend = parseMaxSpend(parsed);
+    const cap = maxSpend ?? DEFAULT_SPEND_CAP_USD;
+    const all = parsed.flags.has("--all");
+    const out = parsed.flags.get("--out");
+    const nextFlag = parsed.flags.get("--next");
+    const next = nextFlag === undefined ? undefined : String(nextFlag);
+    if (all !== (out !== undefined)) throw usage("--all and --out go together", [HELP[side] as string]);
+    if (all && parsed.flags.has("--limit")) throw usage("--limit does not apply to --all; --max-spend bounds it");
+    if (out !== undefined) refuseExisting(String(out));
+    const target = await listTarget(handle, side);
+    const name = `@${target.username}`;
+    const rerun = `x-axi ${side}${handle ? ` ${handle}` : ""}`;
+    const keepCap = maxSpend === undefined ? "" : ` --max-spend ${maxSpend}`;
+    const total = target.total ?? "unknown";
+    const resuming = all && next !== undefined;
+    if (!resuming) {
+      const count = all ? target.total : Math.min(limit, target.total ?? limit);
+      const estimate = count === undefined ? undefined : recorded + count * target.rate;
+      if (estimate === undefined && maxSpend === undefined) {
+        throw new AxiError("X did not return the size of this list, so its cost cannot be estimated; nothing more was read", "SPEND_CAP", ["Pass --max-spend USD to read it up to that amount"]);
+      }
+      if (estimate !== undefined && overCap(estimate, cap)) throw spendCapError(`Reading ${count} of the ${total} ${side} of ${name}`, estimate, cap);
+    }
+    if (out === undefined) {
+      const room = rowsWithinCap(target, cap);
+      if (room < 1) throw spendCapError(`Reading a page of the ${total} ${side} of ${name}`, recorded + target.rate, cap);
+      const page = await userPage(target, side, Math.min(limit, room), next, side);
+      return {
+        target: name,
+        total,
+        ...(page.rows.length ? { count: page.rows.length, users: page.rows } : { users: "0 accounts found" }),
+        ...(page.partial ? { partial_errors: `${page.partial}: ${errorDetail(page.body)}` } : {}),
+        ...(page.next ? { next_token: page.next } : {}),
+        est_cost: money(recorded),
+        ...(page.next ? { help: [`Run \`${rerun} --limit ${limit} --next ${page.next}${keepCap}\` for more, or \`${rerun} --all --out FILE --next ${page.next}${keepCap}\` to export the rest, which stops at the ${money(cap)} cap`] } : {}),
+      };
+    }
+    const file = String(out);
+    reserveFile(file);
+    const result = await readAllUsers(target, side, side, cap, next);
+    if (result.stopped && !result.rows.length && result.stopped.code !== "SPEND_CAP") {
+      rmSync(file, { force: true });
+      throw result.stopped;
+    }
+    writeJson(file, result.rows);
+    return {
+      export: { target: name, total, written: result.rows.length, file, complete: !result.stopped && !result.partial },
+      ...(result.partial ? { partial_errors: result.partial } : {}),
+      ...(result.stopped ? { stopped: { code: result.stopped.code, reason: result.stopped.message } } : {}),
+      ...(result.next ? { next_token: result.next } : {}),
+      est_cost: money(recorded),
+      help: [
+        ...(resuming ? [`What remains after --next cannot be priced in advance, so this read was held to the ${money(cap)} cap instead of being refused up front`] : []),
+        ...(result.stopped ? [...result.stopped.suggestions, result.next ? `The file holds what was read. Continue into a new file with \`${rerun} --all --out NEW_FILE --next ${result.next}${keepCap}\`` : "The file holds what was read"] : []),
+        "This export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan <handle> --out queue.json`",
+      ],
+    };
+  };
+
+  const followPlan = async (args: string[]): Promise<Output> => {
+    const parsed = parseArgs(args, "follow-plan", ["--out", "--max-spend"], ["--include-protected"]);
+    const handle = parseHandle(onePositional(parsed, "follow-plan"));
+    const outFlag = parsed.flags.get("--out");
+    if (outFlag === undefined) throw usage("follow-plan needs --out FILE", [HELP["follow-plan"] as string]);
+    const out = String(outFlag);
+    const holdProtected = !parsed.flags.has("--include-protected");
+    const protectedFile = `${out.replace(/\.json$/i, "")}.protected.json`;
+    const maxSpend = parseMaxSpend(parsed);
+    const cap = maxSpend ?? DEFAULT_SPEND_CAP_USD;
+    refuseExisting(out);
+    if (holdProtected) refuseExisting(protectedFile);
+    const mine = await listTarget(undefined, "following");
+    const theirs = await listTarget(handle, "following");
+    if (theirs.id === mine.id) throw usage("that is your own account; a plan copies another account's following");
+    if ((mine.total === undefined || theirs.total === undefined) && maxSpend === undefined) {
+      throw new AxiError("X did not return the size of these lists, so the cost cannot be estimated; nothing more was read", "SPEND_CAP", ["Pass --max-spend USD to read them up to that amount"]);
+    }
+    if (mine.total !== undefined && theirs.total !== undefined) {
+      const estimate = recorded + mine.total * mine.rate + theirs.total * theirs.rate;
+      if (overCap(estimate, cap)) throw spendCapError(`Reading the ${theirs.total} accounts @${theirs.username} follows and the ${mine.total} you follow`, estimate, cap);
+    }
+    reserveFile(out);
+    const incomplete = (whose: string, result: ReadAll): AxiError => {
+      rmSync(out, { force: true });
+      return new AxiError(
+        `${whose} could not be read in full (${result.stopped?.message ?? `X reported ${result.partial} partial errors`}), so no queue was written; ${money(recorded)} was spent`,
+        result.stopped?.code ?? "INCOMPLETE_READ",
+        [...(result.stopped?.suggestions ?? []), "A queue from a partial list could hold accounts you already follow. X does not re-bill what it served within a UTC day, so a rerun that day should cost little"],
+      );
+    };
+    // Your own list comes first and must be whole: it is what keeps already-followed accounts out of the queue.
+    const own = await readAllUsers(mine, "following", "follow_plan", cap);
+    if (own.stopped || own.partial) throw incomplete("Your following list", own);
+    const source = await readAllUsers(theirs, "following", "follow_plan", cap);
+    if (source.stopped) throw incomplete(`The following list of @${theirs.username}`, source);
+    if (mine.total !== undefined && own.rows.length < mine.total) {
+      warnings.add(`X listed ${own.rows.length} of the ${mine.total} accounts its count says you follow, so one you already follow could still be in the queue`);
+    }
+    if (source.partial) warnings.add(`X reported ${source.partial} partial errors reading @${theirs.username}, so the queue may be missing accounts`);
+    const already = new Set(own.rows.map((user) => user.id));
+    const seen = new Set<string>();
+    const queue: { id: string; username: string }[] = [];
+    const held: { id: string; username: string }[] = [];
+    let alreadyFollowed = 0;
+    let selfExcluded = 0;
+    let unusable = 0;
+    for (const user of source.rows) {
+      if (seen.has(user.id)) continue;
+      seen.add(user.id);
+      const entry = { id: user.id, username: user.username };
+      // follow-file refuses a whole file over one bad entry.
+      if (!/^\d{1,19}$/.test(user.id) || !/^\w{1,15}$/.test(user.username)) unusable += 1;
+      else if (user.id === mine.id) selfExcluded += 1;
+      else if (already.has(user.id)) alreadyFollowed += 1;
+      else if (user.protected && holdProtected) held.push(entry);
+      else queue.push(entry);
+    }
+    writeJson(out, queue);
+    if (held.length) writeJson(protectedFile, held);
+    return {
+      follow_plan: {
+        target: `@${theirs.username}`,
+        target_following: seen.size,
+        your_following: already.size,
+        already_followed: alreadyFollowed,
+        self_excluded: selfExcluded,
+        protected_held: held.length,
+        ...(unusable ? { unusable } : {}),
+        queued: queue.length,
+        queue_file: out,
+        ...(held.length ? { protected_file: protectedFile } : {}),
+      },
+      est_cost: money(recorded),
+      following_them_would_cost: money(queue.length * RATES.userInteraction),
+      help: queue.length
+        ? [`Run \`x-axi follow-file ${out} --dry-run\` to review the first batch, then without --dry-run to follow after approval`]
+        : ["0 accounts to follow: you already follow all of them, or they are held out"],
+    };
+  };
+
   const hideReply = async (args: string[], hidden: boolean): Promise<Output> => {
     const name = hidden ? "hide" : "unhide";
-    const parsed = parseArgs(args, name, []);
+    const parsed = parseArgs(args, name, [], [DRY_RUN]);
     const id = parsePostId(onePositional(parsed, name));
     const account = await refreshAccount();
     const found = await fetchPost(id);
     if (!found) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
-    await gate(hidden ? "Hide reply" : "Unhide reply", account, { content: `@${found.author}: ${displayText(fullText(found.post))}` }, null);
+    const action = hidden ? "Hide reply" : "Unhide reply";
+    const content = `@${found.author}: ${displayText(fullText(found.post))}`;
+    if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method: "PUT", path: `/2/tweets/${id}/hidden`, body: { hidden } }], null, recorded, { target: content });
+    await gate(action, account, { content }, null);
     const check = `Check the reply at https://x.com/i/status/${id}, because x-axi cannot read whether a reply is hidden`;
     const response = await send("PUT", `/2/tweets/${id}/hidden`, { hidden }, name, null, check);
     const state = (response.body["data"] as Json | undefined)?.["hidden"];
     if (state !== hidden) throw outcomeUnknown(`X answered hidden=${String(state)}`, check);
     return { reply: { id, hidden } };
+  };
+
+  const setRepost = async (args: string[], reposted: boolean): Promise<Output> => {
+    const name = reposted ? "repost" : "unrepost";
+    const parsed = parseArgs(args, name, [], [DRY_RUN]);
+    const id = parsePostId(onePositional(parsed, name));
+    const account = await refreshAccount();
+    const found = await fetchPost(id);
+    if (!found) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
+    const action = reposted ? "Repost" : "Undo repost";
+    const content = `@${found.author}: ${displayText(truncate(fullText(found.post), false))}`;
+    const method = reposted ? "POST" : "DELETE";
+    const path = reposted ? `/2/users/${account.id}/retweets` : `/2/users/${account.id}/retweets/${id}`;
+    const body = reposted ? { tweet_id: id } : undefined;
+    if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method, path, ...(body ? { body } : {}) }], null, recorded, { target: content });
+    await gate(action, account, { content }, null);
+    const check = `\`x-axi view\` shows only the post's total repost count, so check your reposts at https://x.com/${account.username}`;
+    const response = await send(method, path, body, name, null, check);
+    if ((response.body["data"] as Json | undefined)?.["retweeted"] !== reposted) throw outcomeUnknown(`X did not confirm the ${name}`, check);
+    return { post: { id, status: reposted ? "reposted" : "not reposted" } };
   };
 
   const commands: Record<string, (args: string[]) => Promise<Output> | Output> = {
@@ -422,6 +808,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const account = await refreshAccount();
       return { account: { id: account.id, handle: `@${account.username}` }, est_cost: money(recorded), help: ["Run `x-axi mentions` to see who mentioned you"] };
     },
+    following: (args) => listUsers(args, "following"),
+    followers: (args) => listUsers(args, "followers"),
+    "follow-plan": followPlan,
     timeline: (args) => ownedList(args, "timeline", "tweets"),
     mentions: (args) => ownedList(args, "mentions", "mentions"),
     replies: (args) => {
@@ -475,12 +864,15 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     dm: async (args) => {
       const [sub, ...rest] = args;
       if (sub === "send") {
-        const parsed = parseArgs(rest, "dm send", []);
+        const parsed = parseArgs(rest, "dm send", [], [DRY_RUN]);
         const handle = parseHandle(parsed.positional[0]);
         const text = parseOutgoingText(parsed.positional[1]);
         if (parsed.positional.length > 2) throw usage("quote the message text as one argument");
         const account = await refreshAccount();
         const target = await resolveUser(handle);
+        if (parsed.flags.has(DRY_RUN)) {
+          return dryRunOutput(`DM to @${target.username}`, account, [{ method: "POST", path: `/2/dm_conversations/with/${target.id}/messages`, body: { text } }], RATES.dmCreate, recorded, linuxDialogReport(approvalRequest(`DM to @${target.username}`, account, { text }, RATES.dmCreate)));
+        }
         await gate(`DM to @${target.username}`, account, { text }, RATES.dmCreate);
         const check = `Check with \`x-axi dm read ${target.username}\``;
         const response = await send("POST", `/2/dm_conversations/with/${target.id}/messages`, { text }, "dm_send", RATES.dmCreate, check);
@@ -512,28 +904,108 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       throw usage("expected `dm list`, `dm read`, or `dm send`", [HELP["dm"] as string]);
     },
     post: async (args) => {
-      const parsed = parseArgs(args, "post", []);
-      if (parsed.positional.length !== 1) throw usage("quote the post text as one argument", [HELP["post"] as string]);
-      const text = parseOutgoingText(parsed.positional[0]);
-      return createPost(text, undefined, await refreshAccount(), estimatePostCost(text, false));
+      const parsed = parseArgs(args, "post", ["--quote", "--media"], [DRY_RUN]);
+      const count = parsed.positional.length;
+      if (count > 1 || (count === 0 && !parsed.flags.has("--media"))) throw usage("quote the post text as one argument", [HELP["post"] as string]);
+      const text = count ? parseOutgoingText(parsed.positional[0]) : undefined;
+      const quoteFlag = parsed.flags.get("--quote");
+      const quote = quoteFlag === undefined ? undefined : parsePostId(String(quoteFlag));
+      if (quote && text === undefined) throw usage("--quote needs text");
+      const media = await prepareMedia(parsed);
+      const account = await refreshAccount();
+      let context: string | undefined;
+      if (quote) {
+        const quoted = await fetchPost(quote);
+        if (!quoted) throw new AxiError(`post ${quote} not found`, "NOT_FOUND");
+        context = `Quoting @${quoted.author}: ${displayText(fullText(quoted.post))}`;
+      }
+      const draft = { ...(text !== undefined ? { text } : {}), ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(context ? { context } : {}), dryRun: parsed.flags.has(DRY_RUN) };
+      return createPost(draft, account, estimatePostCost(text ?? "", false));
     },
     reply: async (args) => {
-      const parsed = parseArgs(args, "reply", []);
-      if (parsed.positional.length !== 2) throw usage("expected a post and one quoted text argument", [HELP["reply"] as string]);
+      const parsed = parseArgs(args, "reply", ["--media"], [DRY_RUN]);
+      const count = parsed.positional.length;
+      if (count < 1 || count > 2 || (count === 1 && !parsed.flags.has("--media"))) throw usage("expected a post and one quoted text argument", [HELP["reply"] as string]);
       const id = parsePostId(parsed.positional[0]);
-      const text = parseOutgoingText(parsed.positional[1]);
+      const text = count === 2 ? parseOutgoingText(parsed.positional[1]) : undefined;
+      const media = await prepareMedia(parsed);
       const account = await refreshAccount();
       const parent = await fetchPost(id);
       if (!parent) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
-      const usd = estimatePostCost(text, String(parent.post["author_id"]) !== account.id);
-      return createPost(text, id, account, usd, `Replying to @${parent.author}: ${displayText(fullText(parent.post))}`);
+      const usd = estimatePostCost(text ?? "", String(parent.post["author_id"]) !== account.id);
+      const context = `Replying to @${parent.author}: ${displayText(fullText(parent.post))}`;
+      return createPost({ ...(text !== undefined ? { text } : {}), replyTo: id, ...(media ? { media } : {}), context, dryRun: parsed.flags.has(DRY_RUN) }, account, usd);
     },
+    thread: async (args) => {
+      const parsed = parseArgs(args, "thread", [], [DRY_RUN]);
+      if (parsed.positional.length < 2) throw usage("a thread needs at least two parts, each quoted as one argument", [HELP["thread"] as string]);
+      const parts = parsed.positional.map((part) => parseOutgoingText(part));
+      const costs = parts.map((part) => estimatePostCost(part, false));
+      const total = costs.reduce((sum, usd) => sum + usd, 0);
+      const content = [
+        `All ${parts.length} parts are published, in this order, each replying to the one before:`,
+        ...parts.flatMap((part, index) => [`Part ${index + 1} of ${parts.length} (${counted(Array.from(part).length, "character")}, ${money(costs[index] as number)}):`, part]),
+      ].join("\n");
+      // The dialog must fit on screen, so the whole thread answers to the same limits as one text.
+      parseOutgoingText(content);
+      const action = `Thread of ${parts.length} posts`;
+      const account = await refreshAccount();
+      if (parsed.flags.has(DRY_RUN)) {
+        const wouldSend = parts.map((text, index) => ({
+          method: "POST",
+          path: "/2/tweets",
+          body: { text, ...(index ? { reply: { in_reply_to_tweet_id: `<id of part ${index}>` } } : {}) },
+        }));
+        return dryRunOutput(action, account, wouldSend, total, recorded, linuxDialogReport(approvalRequest(action, account, { text: content }, total)));
+      }
+      // As text, not content: a dialog may clip content, but every part of a thread is published, so it must show whole or be refused.
+      await gate(action, account, { text: content }, total);
+      const check = "Check with `x-axi timeline`";
+      const posted: Output[] = [];
+      let billed = 0;
+      let previous: string | undefined;
+      for (const [index, text] of parts.entries()) {
+        const usd = costs[index] as number;
+        const body = { text, ...(previous ? { reply: { in_reply_to_tweet_id: previous } } : {}) };
+        let failure: AxiError;
+        try {
+          const response = await send("POST", "/2/tweets", body, "thread", usd, check);
+          const id = (response.body["data"] as Json | undefined)?.["id"];
+          if (id) {
+            billed += usd;
+            previous = String(id);
+            posted.push({ part: index + 1, id: previous, url: `https://x.com/${account.username}/status/${previous}` });
+            continue;
+          }
+          failure = outcomeUnknown("X accepted the request but returned no post ID", check);
+        } catch (error) {
+          if (!(error instanceof AxiError)) throw error;
+          failure = error;
+        }
+        // Nothing is public yet, so this is an ordinary failed post, with its usual code and exit status.
+        if (!posted.length) throw failure;
+        const unknown = failure.code === "OUTCOME_UNKNOWN";
+        if (unknown) billed += usd;
+        return {
+          thread: { posted, total: parts.length, status: "stopped early" },
+          stopped: { part: index + 1, outcome: unknown ? "unknown, it may have been posted" : "not posted", code: failure.code, reason: failure.message, not_attempted: parts.length - index - 1 },
+          est_cost: money(billed),
+          help: [...failure.suggestions, "Do not rerun the whole thread, because the posted parts are public; to continue, reply to the last posted ID"],
+        };
+      }
+      return { thread: { posted, total: parts.length, status: "published" }, est_cost: money(billed) };
+    },
+    repost: (args) => setRepost(args, true),
+    unrepost: (args) => setRepost(args, false),
     delete: async (args) => {
-      const parsed = parseArgs(args, "delete", []);
+      const parsed = parseArgs(args, "delete", [], [DRY_RUN]);
       const id = parsePostId(onePositional(parsed, "delete"));
       const account = await refreshAccount();
       const found = await fetchPost(id);
       if (!found) return { post: { id, status: "already gone (no-op)" } };
+      if (parsed.flags.has(DRY_RUN)) {
+        return dryRunOutput("Delete post", account, [{ method: "DELETE", path: `/2/tweets/${id}` }], RATES.interactionDelete, recorded, { target: displayText(fullText(found.post)) });
+      }
       await gate("Delete post", account, { content: displayText(fullText(found.post)) }, RATES.interactionDelete);
       const check = `Check with \`x-axi view ${id}\``;
       const response = await send("DELETE", `/2/tweets/${id}`, undefined, "delete", RATES.interactionDelete, check);
@@ -543,22 +1015,28 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       return { post: { id, status: "deleted" }, est_cost: money(RATES.interactionDelete) };
     },
     follow: async (args) => {
-      const parsed = parseArgs(args, "follow", []);
+      const parsed = parseArgs(args, "follow", [], [DRY_RUN]);
       const handle = parseHandle(onePositional(parsed, "follow"));
       const account = await refreshAccount();
       assertFollowLogReadable();
       const target = await resolveUser(handle);
+      if (parsed.flags.has(DRY_RUN)) {
+        return dryRunOutput("Follow", account, [{ method: "POST", path: `/2/users/${account.id}/following`, body: { target_user_id: target.id } }], RATES.userInteraction, recorded, { target: `@${target.username}` });
+      }
       await gate("Follow", account, { content: `@${target.username}` }, RATES.userInteraction);
       const data = await sendFollow(account, target);
       persistFollowLog(() => logFollow(account.id, target.id));
       return { follow: { handle: `@${target.username}`, status: data["pending_follow"] === true ? "requested" : "following" }, est_cost: money(RATES.userInteraction) };
     },
     unfollow: async (args) => {
-      const parsed = parseArgs(args, "unfollow", []);
+      const parsed = parseArgs(args, "unfollow", [], [DRY_RUN]);
       const handle = parseHandle(onePositional(parsed, "unfollow"));
       const account = await refreshAccount();
       assertFollowLogReadable();
       const target = await resolveUser(handle);
+      if (parsed.flags.has(DRY_RUN)) {
+        return dryRunOutput("Unfollow", account, [{ method: "DELETE", path: `/2/users/${account.id}/following/${target.id}` }], RATES.interactionDelete, recorded, { target: `@${target.username}` });
+      }
       await gate("Unfollow", account, { content: `@${target.username}` }, RATES.interactionDelete);
       const check = checkProfile(target.username);
       const response = await send("DELETE", `/2/users/${account.id}/following/${target.id}`, undefined, "unfollow", RATES.interactionDelete, check);
@@ -567,7 +1045,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       return { unfollow: { handle: `@${target.username}`, status: "not following" }, est_cost: money(RATES.interactionDelete) };
     },
     "follow-file": async (args) => {
-      const parsed = parseArgs(args, "follow-file", ["--max"]);
+      const parsed = parseArgs(args, "follow-file", ["--max"], [DRY_RUN]);
       const file = onePositional(parsed, "follow-file");
       if (!file) throw usage("expected a JSON file", [HELP["follow-file"] as string]);
       const raw = parsed.flags.get("--max");
@@ -589,14 +1067,17 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const names = batch.slice(0, 10).map((u) => `@${u.username}`).join(", ");
       const more = batch.length > 10 ? `, and ${batch.length - 10} more` : "";
       const provenance = `Usernames come from ${shortenPath(displayText(file))} and were not verified with X.`;
-      await gate(`Follow ${counted(batch.length, "account")} over about ${counted(Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000), "minute")}`, account, { content: `${names}${more}\n\n${provenance}` }, usd);
-      const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((done) => setTimeout(done, ms)));
+      const action = `Follow ${counted(batch.length, "account")} over about ${counted(Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000), "minute")}`;
+      if (parsed.flags.has(DRY_RUN)) {
+        return dryRunOutput(action, account, [{ method: "POST", path: `/2/users/${account.id}/following`, body: "one request per account in batch, as {target_user_id}" }], usd, recorded, { batch, remaining_after: remaining.length - batch.length, provenance });
+      }
+      await gate(action, account, { content: `${names}${more}\n\n${provenance}` }, usd);
       let followed = 0;
       let requested = 0;
       let stopped: Output | undefined;
       let stoppedHelp: string[] = [];
       for (const [index, user] of batch.entries()) {
-        if (index > 0) await sleep(FOLLOW_INTERVAL_MS);
+        if (index > 0) await pause(FOLLOW_INTERVAL_MS);
         try {
           const data = await sendFollow(account, user);
           if (data["pending_follow"] === true) requested += 1;

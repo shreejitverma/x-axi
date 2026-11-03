@@ -197,16 +197,18 @@ function clipToRows(text: string, maxRows: number): string {
  * Outgoing text must be shown in full to be approved, so it is the only thing that can cause a refusal.
  */
 export function linuxApprovalText(request: ApprovalRequest): string | null {
-  const head = approvalHead(request);
+  const head = wrapRows(approvalHead(request));
+  const opening = [joinRows(head.rows), ""];
+  const marksNote = (breaks: number): string[] => (breaks ? [`This dialog splits long words at ${counted(breaks, "mark")} (${CONTINUES}), which are not sent.`] : []);
   const roomForBody = MAX_WRAPPED_LINES - CONTEXT_RESERVE_LINES;
   let shown: string;
   if ("text" in request) {
     const { rows, breaks } = wrapRows(request.text);
-    const note = breaks ? [`This dialog splits long words at ${counted(breaks, "mark")} (${CONTINUES}), which are not sent.`] : [];
-    shown = [head, "", textLabel(request.text), ...note, joinRows(rows)].join("\n");
+    shown = [...opening, textLabel(request.text), ...marksNote(head.breaks + breaks), joinRows(rows)].join("\n");
     if (rowCount(shown) > roomForBody) return null;
   } else {
-    shown = [head, "", clipToRows(request.content, roomForBody - rowCount(head) - 1)].join("\n");
+    const intro = [...opening, ...marksNote(head.breaks)].join("\n");
+    shown = [intro, clipToRows(request.content, roomForBody - rowCount(intro))].join("\n");
   }
   if (!request.context) return shown;
   return [shown, "", CONTEXT_RULE, clipToRows(request.context, MAX_WRAPPED_LINES - rowCount(shown) - 2)].join("\n");

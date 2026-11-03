@@ -26,6 +26,8 @@ export function parseArgs(args: string[], command: string, valueFlags: string[],
     } else if (valueFlags.includes(name)) {
       const value = eq === -1 ? args[++i] : arg.slice(eq + 1);
       if (value === undefined) throw usage(`${name} needs a value`);
+      // The last value winning would silently drop an earlier one, such as a media file.
+      if (parsed.flags.has(name)) throw usage(`${name} was given twice; \`${command}\` takes it once`);
       parsed.flags.set(name, value);
     } else {
       throw usage(`unknown flag ${name} for \`${command}\`; valid flags: ${valid}`);
@@ -46,6 +48,15 @@ export function parseLimit(parsed: Parsed, fallback: number, min: number, max: n
     throw usage(`--limit must be an integer from ${min} to ${max}`);
   }
   return limit;
+}
+
+/** A dollar cap on what one command may spend. Undefined when the flag is absent. */
+export function parseMaxSpend(parsed: Parsed): number | undefined {
+  const raw = parsed.flags.get("--max-spend");
+  if (raw === undefined) return undefined;
+  const usd = Number(raw);
+  if (!Number.isFinite(usd) || usd <= 0) throw usage("--max-spend must be a positive amount in US dollars, such as 2.50");
+  return usd;
 }
 
 /** Accepts a numeric post ID or a post URL. */
@@ -128,6 +139,16 @@ export function displayText(value: string): string {
     .split(ORDINARY_FORMAT)
     .map((part, index) => (index % 2 === 1 ? part : Array.from(part, (ch) => (DECEPTIVE.test(ch) ? "\ufffd" : ch)).join("")))
     .join("");
+}
+
+const MAX_SHOWN_PATH = 120;
+
+/** Keeps both ends of a path, because the name of the file and where it sits are what identify it. */
+export function shortenPath(path: string): string {
+  const characters = Array.from(path);
+  if (characters.length <= MAX_SHOWN_PATH) return path;
+  const end = MAX_SHOWN_PATH / 2;
+  return `${characters.slice(0, end).join("")} ...[${characters.length} characters in full]... ${characters.slice(-end).join("")}`;
 }
 
 export function onePositional(parsed: Parsed, command: string): string | undefined {

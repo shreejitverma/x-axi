@@ -10,7 +10,8 @@ export interface ApiResponse {
 export type Method = "GET" | "POST" | "PUT" | "DELETE";
 
 export interface XClient {
-  request(method: Method, path: string, body?: Json): Promise<ApiResponse>;
+  /** A FormData body goes out as multipart/form-data, which media chunks use; any other body as JSON. */
+  request(method: Method, path: string, body?: Json | FormData): Promise<ApiResponse>;
 }
 
 export const SETUP_HINT = "Run `x-axi setup` for the login steps";
@@ -52,20 +53,23 @@ export function createHttpClient(accessToken: () => Promise<string>): XClient {
   };
 }
 
-async function send(method: Method, url: string, token: string, body: Json | undefined): Promise<ApiResponse> {
+async function send(method: Method, url: string, token: string, body: Json | FormData | undefined): Promise<ApiResponse> {
   let response: Response;
   let text: string;
+  const multipart = body instanceof FormData;
   try {
     response = await fetch(url, {
       method,
       headers: {
         Authorization: `Bearer ${token}`,
-        ...(body ? { "Content-Type": "application/json" } : {}),
+        // fetch writes the multipart header itself, because it carries the boundary.
+        ...(body && !multipart ? { "Content-Type": "application/json" } : {}),
       },
-      ...(body ? { body: JSON.stringify(body) } : {}),
+      ...(body ? { body: multipart ? body : JSON.stringify(body) } : {}),
       // A followed redirect would replay a write and carry the token elsewhere.
       redirect: "manual",
-      signal: AbortSignal.timeout(30_000),
+      // A 5 MB chunk on a slow uplink takes far longer than a JSON request.
+      signal: AbortSignal.timeout(multipart ? 300_000 : 30_000),
     });
     text = await response.text();
   } catch (error) {
