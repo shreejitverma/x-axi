@@ -131,6 +131,8 @@ interface WriteCase {
   argv: string[];
   /** The request the API reference documents for this action. */
   request: Call;
+  /** The spend ledger op the write is billed under. */
+  op: string;
   writeCost: string;
   /** est_cost of a dry run: the reads that validate it, from the published rates. */
   dryRunReads: string;
@@ -144,19 +146,19 @@ interface WriteCase {
 
 const WRITES: WriteCase[] = [
   // Account read $0.01, post read $0.005, its author $0.01.
-  { name: "bookmark", argv: ["bookmark", "50"], request: { method: "POST", path: "/2/users/1/bookmarks", body: { tweet_id: "50" } }, writeCost: "$0.005", dryRunReads: "$0.025", status: { post: { id: "50", status: "bookmarked" } }, unconfirmed: { data: { bookmarked: false } }, newScope: "bookmark.write", shows: ["@alice: parent text"] },
-  { name: "unbookmark", argv: ["unbookmark", "https://x.com/alice/status/50"], request: { method: "DELETE", path: "/2/users/1/bookmarks/50" }, writeCost: "$0.005", dryRunReads: "$0.025", status: { post: { id: "50", status: "not bookmarked" } }, unconfirmed: { data: { bookmarked: true } }, newScope: "bookmark.write", shows: ["@alice: parent text"] },
+  { name: "bookmark", argv: ["bookmark", "50"], request: { method: "POST", path: "/2/users/1/bookmarks", body: { tweet_id: "50" } }, op: "bookmark", writeCost: "$0.005", dryRunReads: "$0.025", status: { post: { id: "50", status: "bookmarked" } }, unconfirmed: { data: { bookmarked: false } }, newScope: "bookmark.write", shows: ["@alice: parent text"] },
+  { name: "unbookmark", argv: ["unbookmark", "https://x.com/alice/status/50"], request: { method: "DELETE", path: "/2/users/1/bookmarks/50" }, op: "unbookmark", writeCost: "$0.005", dryRunReads: "$0.025", status: { post: { id: "50", status: "not bookmarked" } }, unconfirmed: { data: { bookmarked: true } }, newScope: "bookmark.write", shows: ["@alice: parent text"] },
   // Account read only.
-  { name: "list create", argv: ["list", "create", "Friends", "--description", "close ones", "--private"], request: { method: "POST", path: "/2/lists", body: { name: "Friends", description: "close ones", private: true } }, writeCost: "$0.010", dryRunReads: "$0.010", status: { list: { id: "88", name: "Friends", private: true, status: "created" } }, unconfirmed: { data: {} }, newScope: "list.write", shows: ["Friends", "close ones", "private"] },
+  { name: "list create", argv: ["list", "create", "Friends", "--description", "close ones", "--private"], request: { method: "POST", path: "/2/lists", body: { name: "Friends", description: "close ones", private: true } }, op: "list_create", writeCost: "$0.010", dryRunReads: "$0.010", status: { list: { id: "88", name: "Friends", private: true, status: "created" } }, unconfirmed: { data: {} }, newScope: "list.write", shows: ["Friends", "close ones", "private"] },
   // Account read $0.01 and List read $0.005.
-  { name: "list delete", argv: ["list", "delete", "https://x.com/i/lists/77"], request: { method: "DELETE", path: "/2/lists/77" }, writeCost: "$0.005", dryRunReads: "$0.015", status: { list: { id: "77", status: "deleted" } }, unconfirmed: { data: { deleted: false } }, newScope: "list.write", shows: ['List "Friends"', "3 members", "private"] },
+  { name: "list delete", argv: ["list", "delete", "https://x.com/i/lists/77"], request: { method: "DELETE", path: "/2/lists/77" }, op: "list_delete", writeCost: "$0.005", dryRunReads: "$0.015", status: { list: { id: "77", status: "deleted" } }, unconfirmed: { data: { deleted: false } }, newScope: "list.write", shows: ['List "Friends"', "3 members", "private"] },
   // Account read, List read, and the member lookup $0.01.
-  { name: "list add", argv: ["list", "add", "77", "@alice"], request: { method: "POST", path: "/2/lists/77/members", body: { user_id: "9" } }, writeCost: "$0.005", dryRunReads: "$0.025", status: { list_member: { list: "77", handle: "@alice", status: "member" } }, unconfirmed: { data: { is_member: false } }, newScope: "list.write", shows: ["@alice", 'List "Friends"'] },
-  { name: "list remove", argv: ["list", "remove", "77", "alice"], request: { method: "DELETE", path: "/2/lists/77/members/9" }, writeCost: "$0.005", dryRunReads: "$0.025", status: { list_member: { list: "77", handle: "@alice", status: "not a member" } }, unconfirmed: { data: { is_member: true } }, newScope: "list.write", shows: ["@alice", 'List "Friends"'] },
+  { name: "list add", argv: ["list", "add", "77", "@alice"], request: { method: "POST", path: "/2/lists/77/members", body: { user_id: "9" } }, op: "list_add", writeCost: "$0.005", dryRunReads: "$0.025", status: { list_member: { list: "77", handle: "@alice", status: "member" } }, unconfirmed: { data: { is_member: false } }, newScope: "list.write", shows: ["@alice", 'List "Friends"'] },
+  { name: "list remove", argv: ["list", "remove", "77", "alice"], request: { method: "DELETE", path: "/2/lists/77/members/9" }, op: "list_remove", writeCost: "$0.005", dryRunReads: "$0.025", status: { list_member: { list: "77", handle: "@alice", status: "not a member" } }, unconfirmed: { data: { is_member: true } }, newScope: "list.write", shows: ["@alice", 'List "Friends"'] },
   // Account read and the target lookup.
-  { name: "mute", argv: ["mute", "alice"], request: { method: "POST", path: "/2/users/1/muting", body: { target_user_id: "9" } }, writeCost: "$0.015", dryRunReads: "$0.020", status: { mute: { handle: "@alice", status: "muted" } }, unconfirmed: { data: { muting: false } }, newScope: "mute.write", shows: ["@alice"] },
-  { name: "unmute", argv: ["unmute", "alice"], request: { method: "DELETE", path: "/2/users/1/muting/9" }, writeCost: "$0.005", dryRunReads: "$0.020", status: { unmute: { handle: "@alice", status: "not muted" } }, unconfirmed: { data: { muting: true } }, shows: ["@alice"], newScope: "mute.write" },
-  { name: "post --poll", argv: ["post", "Which one?", "--poll", "Tea | Coffee|Water", "--poll-minutes", "60"], request: { method: "POST", path: "/2/tweets", body: { text: "Which one?", poll: { options: ["Tea", "Coffee", "Water"], duration_minutes: 60 } } }, writeCost: "$0.015", dryRunReads: "$0.010", status: { post: { id: "60", status: "published" } }, unconfirmed: {}, shows: ['"Tea" | "Coffee" | "Water"', "60 minutes", "Which one?"] },
+  { name: "mute", argv: ["mute", "alice"], request: { method: "POST", path: "/2/users/1/muting", body: { target_user_id: "9" } }, op: "mute", writeCost: "$0.015", dryRunReads: "$0.020", status: { mute: { handle: "@alice", status: "muted" } }, unconfirmed: { data: { muting: false } }, newScope: "mute.write", shows: ["@alice"] },
+  { name: "unmute", argv: ["unmute", "alice"], request: { method: "DELETE", path: "/2/users/1/muting/9" }, op: "unmute", writeCost: "$0.005", dryRunReads: "$0.020", status: { unmute: { handle: "@alice", status: "not muted" } }, unconfirmed: { data: { muting: true } }, shows: ["@alice"], newScope: "mute.write" },
+  { name: "post --poll", argv: ["post", "Which one?", "--poll", "Tea | Coffee|Water", "--poll-minutes", "60"], request: { method: "POST", path: "/2/tweets", body: { text: "Which one?", poll: { options: ["Tea", "Coffee", "Water"], duration_minutes: 60 } } }, op: "post", writeCost: "$0.015", dryRunReads: "$0.010", status: { post: { id: "60", status: "published" } }, unconfirmed: {}, shows: ['"Tea" | "Coffee" | "Water"', "60 minutes", "Which one?"] },
 ];
 
 describe.each(WRITES)("$name", (write) => {
@@ -169,7 +171,7 @@ describe.each(WRITES)("$name", (write) => {
     for (const part of write.shows) expect(shown).toContain(part);
     expect(shown).toContain(`about ${write.writeCost}`);
     expect(out).toMatchObject({ ...write.status, est_cost: write.writeCost });
-    expect(ledger().some((e) => e.usd === Number(write.writeCost.slice(1)))).toBe(true);
+    expect(ledger().some((e) => e.op === write.op && e.usd === Number(write.writeCost.slice(1)))).toBe(true);
   });
 
   for (const result of ["cancelled", "timed_out", "unavailable"] as const) {
@@ -213,7 +215,7 @@ describe.each(WRITES)("$name", (write) => {
     const error = await failure(run(h, write.argv));
     expect(error.code).toBe("OUTCOME_UNKNOWN");
     expect(h.writes()).toHaveLength(1);
-    expect(ledger().some((e) => e.usd === Number(write.writeCost.slice(1)))).toBe(true);
+    expect(ledger().some((e) => e.op === write.op && e.usd === Number(write.writeCost.slice(1)))).toBe(true);
   });
 
   it("reports OUTCOME_UNKNOWN on a 5xx and never retries", async () => {
@@ -226,7 +228,7 @@ describe.each(WRITES)("$name", (write) => {
     const h = harness(fakeX((c) => (c.method !== "GET" ? ok({ title: "Forbidden", detail: "You are not allowed to do this" }, 403) : undefined)));
     await expect(run(h, write.argv)).rejects.toMatchObject({ code: "FORBIDDEN" });
     expect(h.writes()).toHaveLength(1);
-    expect(ledger().some((e) => e.usd === Number(write.writeCost.slice(1)) && !["me", "user", "view", "list_lookup"].includes(e.op))).toBe(false);
+    expect(ledger().some((e) => e.op === write.op)).toBe(false);
   });
 });
 

@@ -17,6 +17,7 @@ x-axi mentions --limit 5                     # $0.001 per post plus $0.01 per au
 x-axi post "hello from x-axi" --dry-run      # the exact request and cost, with no dialog and no write
 ```
 
+The npm package exists only after the first publish, which has not happened yet; until then, install from source as [Install](#install) shows.
 The client ID comes from an app you create once at <https://console.x.com>, as [Connect your account](#connect-your-account) describes.
 Pay-per-use API calls are billed to that app, so set a spend limit there first.
 
@@ -38,6 +39,7 @@ Pay-per-use API calls are billed to that app, so set a spend limit there first.
 npm install -g @shreejitverma/x-axi
 ```
 
+The npm package exists only after the first publish, which has not happened yet, so until then install from source as shown below.
 Node 20 or newer.
 The package installs one command, `x-axi`.
 `x-axi update` prints the installed version and the update command for npm and for a git checkout; it installs nothing itself.
@@ -302,7 +304,7 @@ Checked on 2026-11-03 against the [changelog](https://docs.x.com/changelog), [pr
   The [Blocks introduction](https://docs.x.com/x-api/users/blocks/introduction) lists `GET /2/users/:id/blocking` as Pay-per-use and Enterprise, and `POST /2/users/:id/blocking` and `DELETE /2/users/:source_user_id/blocking/:target_user_id` as Enterprise only; the [Block User reference](https://docs.x.com/x-api/users/block-user) says the same in the [API index](https://docs.x.com/x-api/llms.txt).
 - The [Personalized Trends introduction](https://docs.x.com/x-api/trends/personalized-trends/introduction) lists a Premium user subscription as a requirement, so `trends` without `--woeid` may return `FORBIDDEN` on an account without X Premium.
 - The [Trends by WOEID reference](https://docs.x.com/x-api/trends/get-trends-by-woeid) lists OAuth 2.0 user context and an app Bearer Token, while its [introduction](https://docs.x.com/x-api/trends/trends-by-woeid/introduction) shows only the app token; x-axi sends the user token, which is untested live.
-- Bookmarks, liked posts, Lists, mutes, and trends were added on 2026-11-03 from their API references, and none of them has been run against live X.
+- Bookmarks, liked posts, Lists, mutes, blocks, trends, `post --poll`, and the quote, bookmark, and impression counts in `view` were added on 2026-11-03 from their API references, and none of them has been run against live X.
 - [Following](https://help.x.com/en/using-x/x-follow-limit) is limited to 400 per day and 50 per 15 minutes, and X may lock accounts for aggressive following.
   `follow-file` asks once per batch, follows every 20 seconds, caps itself at 400 in 24 hours, and stops at the first error.
   Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.

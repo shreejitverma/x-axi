@@ -57,6 +57,7 @@ Never commit a token, a client secret, or output that holds one.
 
 Releases publish `@shreejitverma/x-axi` to npm from `.github/workflows/release.yml`, with npm trusted publishing and provenance, and create a GitHub Release with generated notes.
 There is no changelog file; the GitHub Release notes are the changelog.
+The release workflow has not run yet, so the steps below are untested until the first tagged release.
 
 One-time setup by the package owner on npmjs.com:
 
