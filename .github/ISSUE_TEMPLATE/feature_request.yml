@@ -1,0 +1,29 @@
+name: Feature request
+description: Ask for a command or behavior x-axi does not have.
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you want to do
+      description: The task, in terms of your X account or the X API.
+    validations:
+      required: true
+  - type: input
+    id: endpoint
+    attributes:
+      label: X API endpoint
+      description: The docs.x.com reference page for the endpoint this needs, if you know it.
+      placeholder: https://docs.x.com/x-api/...
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed command
+      description: Usage, output fields, and whether it writes. Every write opens the approval dialog and takes --dry-run.
+  - type: checkboxes
+    id: limits
+    attributes:
+      label: Checks
+      options:
+        - label: I checked "X platform limits" in the README, and the endpoint is not Enterprise only.
+          required: true

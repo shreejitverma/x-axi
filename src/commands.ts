@@ -1,7 +1,7 @@
 import { AxiError } from "axi-sdk-js";
 import { errorDetail, SETUP_HINT, toApiError, type ApiResponse, type Json, type Method, type XClient } from "./api.js";
 import { counted, linuxApprovalText, type ApprovalBody, type ApprovalRequest, type ApprovalResult, type Approver } from "./approve.js";
-import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseMaxSpend, parseOutgoingText, parsePostId, shortenPath, usage, type Parsed } from "./args.js";
+import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseListId, parseMaxSpend, parseOutgoingText, parsePollMinutes, parsePollOptions, parsePostId, parseShortText, shortenPath, usage, type Parsed } from "./args.js";
 import type { AuthService } from "./auth.js";
 import { configPath, DEFAULT_REDIRECT_URI, parseClientId, readConfig, writeConfig } from "./config.js";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -9,12 +9,15 @@ import { assertFollowLogReadable, clearAccount, DAY_MS, logFollow, logFollowAtte
 import { chunkCount, describeMedia, inspectMedia, MEDIA_CHUNK_BYTES, readChunks, type MediaFile } from "./media.js";
 import { SCOPES } from "./oauth.js";
 import { DEFAULT_SPEND_CAP_USD, estimatePostCost, RATES } from "./rates.js";
+import { NPM_PACKAGE, VERSION } from "./version.js";
 
 export interface Deps {
   client: XClient;
   approve: Approver;
   auth: AuthService;
   sleep?: (ms: number) => Promise<void>;
+  /** process.platform outside tests; decides whether a dry run warns about the Linux dialog. */
+  platform?: NodeJS.Platform;
 }
 
 // X allows 50 follows per 15 minutes and 400 per day. These stay under both.
@@ -34,6 +37,11 @@ export type Output = Record<string, unknown>;
 
 const PREVIEW = 280;
 const POST_FIELDS = "tweet.fields=created_at,public_metrics,conversation_id,note_tweet,entities&expansions=author_id&user.fields=username";
+// GET /2/users/{id}/muting and /blocking take max_results from 1 to 1000; list members and owned lists from 1 to 100.
+const LIST_PAGE_MAX = 100;
+const LIST_NAME_MAX = 25;
+const LIST_DESCRIPTION_MAX = 100;
+const WOEID_TRENDS_MAX = 50;
 
 // ---- reading -----------------------------------------------------------------
 
@@ -90,6 +98,11 @@ function truncate(text: string, full: boolean): string {
   return `${text.slice(0, PREVIEW)}... (truncated, ${text.length} chars total)`;
 }
 
+interface Poll {
+  options: string[];
+  duration_minutes: number;
+}
+
 interface Row extends Output {
   id: string;
   author: string;
@@ -120,7 +133,7 @@ function replyChance(post: Json, me: Account): "yes" | "likely" | "unlikely" {
   return mentioned ? "likely" : "unlikely";
 }
 
-function listOutput(key: string, rows: Row[], body: Json, emptyMessage: string, cost: Output): Output {
+function listOutput(key: string, rows: Output[], body: Json, emptyMessage: string, cost: Output): Output {
   const meta = body["meta"] as { next_token?: string; result_count?: number } | undefined;
   // "0 results" must be X's answer, not the absence of one.
   if (!Array.isArray(body["data"]) && meta?.result_count === undefined) {
@@ -153,9 +166,30 @@ function approvalRequest(action: string, account: Account, body: ApprovalBody, e
   return { action, account: account.username, ...body, estCostUsd, ...(context ? { context } : {}) };
 }
 
-/** A dry run never opens the dialog, so it asks the same question the Linux dialog would. */
-function linuxDialogReport(request: ApprovalRequest): Output {
-  return linuxApprovalText(request) === null ? { linux_dialog: "too long: on Linux the real run refuses this with APPROVAL_TEXT_TOO_LONG and sends nothing; the macOS dialog has no such limit" } : {};
+/** A dry run never opens the dialog, so on Linux it asks the same question the Linux dialog would. Elsewhere that dialog is never used. */
+function linuxDialogReport(request: ApprovalRequest, platform: NodeJS.Platform): Output {
+  if (platform !== "linux") return {};
+  return linuxApprovalText(request) === null ? { linux_dialog: "too long: the real run refuses this with APPROVAL_TEXT_TOO_LONG and sends nothing" } : {};
+}
+
+function userRows(body: Json): Output[] {
+  return ((body["data"] as Json[] | undefined) ?? []).map((user) => ({ id: String(user["id"]), username: String(user["username"]), name: String(user["name"] ?? "") }));
+}
+
+function nextHelp(command: string, next: unknown): string[] {
+  return typeof next === "string" ? [`Run \`${command} --next ${next}\` for more`] : [];
+}
+
+interface ListInfo {
+  id: string;
+  name: string;
+  members: number | undefined;
+  private: boolean;
+}
+
+function describeList(list: ListInfo): string {
+  const members = list.members === undefined ? "member count unknown" : counted(list.members, "member");
+  return `List "${displayText(list.name)}" (${list.private ? "private" : "public"}, ${members}, id ${list.id})`;
 }
 
 function includedUsers(body: Json): number {
@@ -172,14 +206,14 @@ export const HELP: Record<string, string> = {
   timeline: "usage: x-axi timeline [--limit 5-100] [--next TOKEN] [--full]\nYour recent posts.",
   mentions: "usage: x-axi mentions [--limit 5-100] [--next TOKEN] [--full]\nPosts mentioning you, with a reply_via_api hint.",
   replies: "usage: x-axi replies <post-id-or-url> [--limit 10-100] [--next TOKEN] [--full]\nThe post's conversation. X recent search covers the last 7 days only.",
-  view: "usage: x-axi view <post-id-or-url> [--full]",
+  view: "usage: x-axi view <post-id-or-url> [--full]\nThe post with its public metrics: replies, likes, reposts, and quotes, bookmarks, and impressions where X returns them. Costs about $0.005, plus $0.01 for the author.",
   search: "usage: x-axi search <query> [--limit 10-100] [--next TOKEN] [--full]\nRecent search, last 7 days. Each result costs about $0.005.",
   user: "usage: x-axi user <handle>",
   dm: "usage:\n  x-axi dm list [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm read <handle> [--limit 1-100] [--next TOKEN] [--full]\n  x-axi dm send <handle> <text> [--dry-run]   (needs your approval)\nEncrypted XChat conversations are not covered.",
   following: "usage: x-axi following [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi following [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts a user follows; yours without a handle. Shows the total. Each account costs about $0.01, or $0.001 on your own list when you own the app, plus $0.01 for the lookup that gives the total. A read estimated above $1 refuses without a --max-spend that covers it, and if X's total proves too low, a page is cut short at the cap and --all stops there. --all with --next cannot be priced in advance, so it always stops at the cap and prints how to continue. --all writes a JSON array and never overwrites a file. The export is unfiltered, so it can hold accounts you already follow; build a follow queue with `x-axi follow-plan`.",
   followers: "usage: x-axi followers [handle] [--limit 1-1000] [--next TOKEN] [--max-spend USD]\n       x-axi followers [handle] --all --out file.json [--next TOKEN] [--max-spend USD]\nAccounts following a user; yours without a handle. Costs, caps, and the unfiltered --all export as for `following`.",
   "follow-plan": "usage: x-axi follow-plan <handle> --out queue.json [--max-spend USD] [--include-protected]\nReads that account's following and your own following once, removes accounts you already follow and yourself, and writes a queue for follow-file. Protected accounts go to <out>.protected.json instead of the queue unless you pass --include-protected. Writes nothing to X. About $0.01 per account listed, $0.001 on your own list when you own the app, and $0.02 for the two lookups that give the totals. An estimate above $1 refuses without a --max-spend that covers it. Never overwrites a file. Writes no queue if either read stops early or your own list has partial errors; partial errors on their list, or X listing fewer of your follows than its count, still write the queue with a warning.",
-  post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
+  post: "usage: x-axi post <text> [--quote POST] [--media FILE] [--poll \"A|B[|C|D]\" [--poll-minutes 5-10080]] [--dry-run]\nOpens an approval dialog, then publishes. Costs about $0.015, or $0.20 with a URL. --media attaches one JPEG, PNG, WebP (5 MiB), GIF (15 MiB), or MP4, MOV, or WebM video (16 GiB, or 8 GB without Premium); the file is checked before any spend and uploaded only after approval, and the text may then be left out. Upload needs the media.write scope and X lists no price for it. --poll adds 2 to 4 options of 1 to 25 characters, separated by |, open --poll-minutes (default 1440, one day); it needs text and cannot be combined with --media or --quote, and the dialog shows every option and the duration. X's docs say --quote needs an Enterprise plan, so expect FORBIDDEN on self-serve. --dry-run prints what would be sent, with no approval and no write; reads made to validate it are billed.",
   reply: "usage: x-axi reply <post-id-or-url> <text> [--media FILE] [--dry-run]\nOpens an approval dialog showing the parent post. X allows this only on your own posts or when the author mentioned or quoted you. --media and --dry-run work as on `post`.",
   thread: "usage: x-axi thread <first> <second> ... [--dry-run]\nPosts each part as a reply to the part before it, after one approval dialog showing every part and the total cost. The Linux dialog has room for about 8 short parts. Each part costs as a post of its own: about $0.015, or $0.20 with a URL. If a part fails it stops, never retries, and reports the posted IDs and that part's outcome. Do not rerun a stopped thread: the posted parts are public.",
   delete: "usage: x-axi delete <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. Already deleted is a no-op.",
@@ -190,13 +224,24 @@ export const HELP: Record<string, string> = {
   follow: "usage: x-axi follow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.015.",
   unfollow: "usage: x-axi unfollow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.01.",
   "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. One follow every 20 seconds, at most 400 in 24 hours, default 100 per run. Stops at the first error. Rerun to continue. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
+  bookmarks: "usage: x-axi bookmarks [--limit 1-100] [--next TOKEN] [--full]\nYour bookmarked posts. About $0.001 per post at the Owned Read rate when you own the app, plus $0.01 per author. Needs the bookmark.read scope.",
+  bookmark: "usage: x-axi bookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then bookmarks it. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
+  unbookmark: "usage: x-axi unbookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then removes the bookmark. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
+  likes: "usage: x-axi likes [handle] [--limit 5-100] [--next TOKEN] [--full]\nPosts a user liked; yours without a handle. About $0.001 per post, plus $0.01 per author and $0.01 for the lookup of another account. Needs the like.read scope.",
+  lists: "usage: x-axi lists [handle] [--limit 1-100] [--next TOKEN]\nLists a user owns; yours without a handle. About $0.005 per List, or $0.001 on your own when you own the app, plus $0.01 for the lookup of another account. Needs the list.read scope.",
+  list: "usage:\n  x-axi list view <list> [--limit 1-100] [--next TOKEN] [--full]          posts, about $0.005 each plus $0.01 per author\n  x-axi list members <list> [--limit 1-100] [--next TOKEN]                about $0.01 per member\n  x-axi list create <name> [--description TEXT] [--private] [--dry-run]   about $0.010\n  x-axi list delete <list> [--dry-run]                                    about $0.005\n  x-axi list add <list> <handle> [--dry-run]                              about $0.005\n  x-axi list remove <list> <handle> [--dry-run]                           about $0.005\n<list> is a List ID or a URL such as https://x.com/i/lists/123. A name is 1 to 25 characters and a description at most 100. Each write opens an approval dialog naming the List and the member; delete, add, and remove first read the List, about $0.005, and add and remove look up the handle, about $0.01. Needs the list.read and list.write scopes.",
+  mutes: "usage: x-axi mutes [--limit 1-1000] [--next TOKEN]\nAccounts you muted. About $0.001 per account. Needs the mute.read scope.",
+  mute: "usage: x-axi mute <handle> [--dry-run]\nOpens an approval dialog, then mutes the account. Costs about $0.015, plus $0.01 for the lookup. Needs the mute.write scope.",
+  unmute: "usage: x-axi unmute <handle> [--dry-run]\nOpens an approval dialog, then unmutes the account. Costs about $0.005, plus $0.01 for the lookup. Needs the mute.write scope.",
+  blocks: "usage: x-axi blocks [--limit 1-1000] [--next TOKEN]\nAccounts you blocked. About $0.001 per account. Read only: X's block and unblock endpoints are Enterprise only. Needs the block.read scope.",
+  trends: "usage: x-axi trends [--woeid N [--limit 1-50]]\nTrends personalized for you, or for a place by its Yahoo WOEID, such as 1 for worldwide. About $0.010 per request, however many trends come back. X's docs say personalized trends need an X Premium subscription on the account, and they show WOEID trends with an app token, though the reference also lists user context, so either may return FORBIDDEN.",
   spend: "usage: x-axi spend\nLocal upper-bound estimate of API spend. No API call.",
   api: "usage: x-axi api </2/path?query>\nRaw GET for read endpoints without a command. Spend is not estimated. Writes are not available here.",
   setup: "usage: x-axi setup\nShows login state, the keystore, and the exact X portal steps. No API call.",
   login: "usage: x-axi login [--client-id ID]\nSigns in to X in your browser with OAuth 2.0 PKCE and stores the login in the OS keystore. Run it yourself in a terminal, never through an agent. The client ID comes from --client-id or the config file, and the flag's value is saved to the config file. Then fetches your account, about $0.01. A login that replaces another account's stored login revokes the old tokens; one that replaces the same account's leaves them live and says so, so run `x-axi logout` first after a suspected leak.",
   logout: "usage: x-axi logout\nRevokes the tokens at X and deletes the stored login. No approval dialog; deleting is reported even when revocation fails.",
   auth: "usage: x-axi auth status\nShows the account, scopes, access token expiry, and where the login is stored. Never shows a token. No API call.",
-  update: "usage: x-axi update\nShows how to update from your git checkout. It installs nothing.",
+  update: `usage: x-axi update\nShows the installed version and how to update, with npm (${NPM_PACKAGE}) or from a git checkout. It installs nothing.`,
 };
 
 const EARLIER_TOKENS_LIVE = "The earlier login's tokens stay live at X, because revoking them could also end this login. After a suspected leak, run `x-axi logout` before `x-axi login`, which revokes them; to end them now, revoke the app at https://x.com/settings/connected_apps and log in again";
@@ -226,6 +271,7 @@ export function homeOutput(): Output {
           "Run `x-axi mentions` to see who mentioned you",
           "Run `x-axi timeline` for your posts, `x-axi replies <id>` for comments",
           "Run `x-axi post <text>` or `x-axi reply <id> <text>`; each opens an approval dialog",
+          "Run `x-axi bookmarks`, `x-axi lists`, or `x-axi trends` for your saved posts, Lists, and trends",
         ]
       : [SETUP_HINT],
   };
@@ -233,6 +279,7 @@ export function homeOutput(): Output {
 
 export function buildCommands(deps: Deps): Record<string, (args: string[]) => Promise<Output>> {
   const flagsForList = ["--limit", "--next"];
+  const platform = deps.platform ?? process.platform;
 
   // Local bookkeeping problems surface here, because they must never hide or fail a write that X confirmed.
   const warnings = new Set<string>();
@@ -347,7 +394,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         "Ask the user to install zenity (or kdialog) from their distribution; there is no terminal prompt or override",
       ],
       unsupported_platform: [
-        `writes need a native approval dialog, which x-axi has only on macOS and Linux, not on ${process.platform}; nothing was sent`,
+        `writes need a native approval dialog, which x-axi has only on macOS and Linux, not on ${platform}; nothing was sent`,
         "APPROVAL_UNSUPPORTED_PLATFORM",
         "Run writes on macOS or Linux; there is no terminal prompt or override",
       ],
@@ -404,14 +451,26 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
 
   const pause = (ms: number): Promise<void> => (deps.sleep ?? ((wait: number) => new Promise<void>((done) => setTimeout(done, wait))))(ms);
 
+  /**
+   * Logins made before x-axi asked for a scope lack it, and X would refuse the call after a lookup was billed.
+   * This reads only the stored login, so it stops before any spend or dialog. A login whose scopes are unknown is let through.
+   */
+  const requireScopes = async (needed: readonly string[], what: string): Promise<void> => {
+    const { scopes } = await deps.auth.status();
+    const missing = scopes ? needed.filter((scope) => !scopes.includes(scope)) : [];
+    if (!missing.length) return;
+    throw new AxiError(
+      `this login has no ${missing.join(" ")} ${missing.length === 1 ? "scope" : "scopes"}, which ${what} needs, because it was granted before x-axi asked for ${missing.length === 1 ? "it" : "them"}`,
+      "MISSING_SCOPE",
+      ["Run `x-axi login` in your own terminal to grant it; nothing was sent to X and nothing was spent"],
+    );
+  };
+
   const prepareMedia = async (parsed: Parsed): Promise<MediaFile | undefined> => {
     const file = parsed.flags.get("--media");
     if (file === undefined) return undefined;
     const media = inspectMedia(String(file));
-    const { scopes } = await deps.auth.status();
-    if (scopes && !scopes.includes("media.write")) {
-      throw new AxiError("this login has no media.write scope, because it was granted before x-axi asked for it", "MISSING_SCOPE", ["Run `x-axi login` in your own terminal to grant it; nothing was sent"]);
-    }
+    await requireScopes(["media.write"], "--media");
     return media;
   };
 
@@ -461,16 +520,19 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     }
   };
 
-  const createPost = async (draft: { text?: string; replyTo?: string; quote?: string; media?: MediaFile; context?: string; dryRun: boolean }, account: Account, usd: number): Promise<Output> => {
-    const { text, replyTo, quote, media, context } = draft;
+  const createPost = async (draft: { text?: string; replyTo?: string; quote?: string; media?: MediaFile; poll?: Poll; context?: string; dryRun: boolean }, account: Account, usd: number): Promise<Output> => {
+    const { text, replyTo, quote, media, poll, context } = draft;
     const op = replyTo ? "reply" : "post";
     const check = "Check with `x-axi timeline`";
     const verb = replyTo ? "Reply" : quote ? "Quote post" : "Post";
-    const action = media ? `${verb} with media ${describeMedia(media)}, upload price not listed by X,` : verb;
+    // Options are quoted as JSON strings in the tool-written first line, so one option cannot pose as two or as the duration.
+    const pollShown = poll ? ` with a poll of ${counted(poll.options.length, "option")}, ${poll.options.map((option) => JSON.stringify(option)).join(" | ")}, open ${counted(poll.duration_minutes, "minute")},` : "";
+    const action = media ? `${verb} with media ${describeMedia(media)}, upload price not listed by X,` : `${verb}${pollShown}`;
     const fields: Json = {
       ...(text !== undefined ? { text } : {}),
       ...(replyTo ? { reply: { in_reply_to_tweet_id: replyTo } } : {}),
       ...(quote ? { quote_tweet_id: quote } : {}),
+      ...(poll ? { poll: { options: poll.options, duration_minutes: poll.duration_minutes } } : {}),
     };
     const approvalBody: ApprovalBody = text !== undefined ? { text } : { content: "No text; only the media named above is posted." };
     if (draft.dryRun) {
@@ -485,7 +547,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       return dryRunOutput(action, account, [...upload, post], usd, recorded, {
         ...(media ? { media: describeMedia(media) } : {}),
         ...(context ? { context: truncate(context, false) } : {}),
-        ...linuxDialogReport(approvalRequest(action, account, approvalBody, usd, context)),
+        ...(poll ? { poll: { options: poll.options, duration_minutes: poll.duration_minutes } } : {}),
+        ...linuxDialogReport(approvalRequest(action, account, approvalBody, usd, context), platform),
       });
     }
     await gate(action, account, approvalBody, usd, context);
@@ -802,6 +865,219 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     return { post: { id, status: reposted ? "reposted" : "not reposted" } };
   };
 
+  // Scopes from each endpoint's API reference on docs.x.com, read 2026-11-03.
+  const SCOPES_FOR = {
+    bookmarks: ["tweet.read", "users.read", "bookmark.read"],
+    bookmarkWrite: ["tweet.read", "users.read", "bookmark.write"],
+    likes: ["tweet.read", "users.read", "like.read"],
+    listRead: ["tweet.read", "users.read", "list.read"],
+    // Writes that name the List in the dialog read it first.
+    listWrite: ["tweet.read", "users.read", "list.read", "list.write"],
+    mutes: ["tweet.read", "users.read", "mute.read"],
+    muteWrite: ["tweet.read", "users.read", "mute.write"],
+    blocks: ["tweet.read", "users.read", "block.read"],
+  } as const;
+
+  /** Your own account without a handle; another account costs a lookup. Owned Read pricing applies only to your own. */
+  const whose = async (handle: string | undefined): Promise<Account & { own: boolean }> => {
+    if (!handle) return { ...(await me()), own: true };
+    const target = await resolveUser(handle);
+    return { ...target, own: target.id === readAccount()?.id };
+  };
+
+  /** One page of posts, priced per post at `rate` plus each author X includes. */
+  const postPage = async (path: string, rate: number, op: string, empty: string, full: boolean, account?: Account): Promise<Output> => {
+    const response = await get(deps, path);
+    if (!Array.isArray(response.body["data"]) && saysNotFound(response.body)) throw new AxiError(errorDetail(response.body), "NOT_FOUND");
+    const rows = postRows(response.body, account, full);
+    const usd = rows.length * rate + includedUsers(response.body) * RATES.userRead;
+    return listOutput("posts", rows, response.body, empty, charge(op, usd));
+  };
+
+  const userPageOf = async (path: string, rate: number, op: string, empty: string): Promise<Output> => {
+    const response = await get(deps, path);
+    if (!Array.isArray(response.body["data"]) && saysNotFound(response.body)) throw new AxiError(errorDetail(response.body), "NOT_FOUND");
+    const rows = userRows(response.body);
+    return listOutput("users", rows, response.body, empty, charge(op, rows.length * rate));
+  };
+
+  /** Lists of accounts only X shows you: mutes and blocks. */
+  const ownUsers = async (args: string[], name: "mutes" | "blocks", endpoint: string, rate: number, scopes: readonly string[]): Promise<Output> => {
+    const parsed = parseArgs(args, name, flagsForList);
+    if (parsed.positional.length) throw usage(`\`${name}\` takes no arguments`);
+    const limit = parseLimit(parsed, 20, 1, USER_PAGE_MAX);
+    await requireScopes(scopes, `\`${name}\``);
+    const account = await me();
+    const out = await userPageOf(`/2/users/${account.id}/${endpoint}?${pagedQuery(limit, parsed.flags.get("--next"))}`, rate, name, `0 accounts ${name === "mutes" ? "muted" : "blocked"}`);
+    return { account: `@${account.username}`, ...out, help: nextHelp(`x-axi ${name} --limit ${limit}`, out["next_token"]) };
+  };
+
+  /** The List a write names in its dialog, or undefined when X says it does not exist. Billed as a List read. */
+  const fetchList = async (id: string): Promise<ListInfo | undefined> => {
+    const response = await read(deps, `/2/lists/${id}?list.fields=member_count,private`);
+    if (response.status === 404) return undefined;
+    if (response.status >= 300) throw toApiError(response);
+    const data = response.body["data"] as Json | undefined;
+    if (!data?.["id"]) {
+      if (saysNotFound(response.body)) return undefined;
+      throw unreadable(`List ${id}`, response.body);
+    }
+    spend("list_lookup", RATES.listRead);
+    const members = data["member_count"];
+    return { id: String(data["id"]), name: String(data["name"] ?? ""), members: typeof members === "number" ? members : undefined, private: data["private"] === true };
+  };
+
+  const setBookmark = async (args: string[], bookmarked: boolean): Promise<Output> => {
+    const name = bookmarked ? "bookmark" : "unbookmark";
+    const parsed = parseArgs(args, name, [], [DRY_RUN]);
+    const id = parsePostId(onePositional(parsed, name));
+    await requireScopes(SCOPES_FOR.bookmarkWrite, `\`${name}\``);
+    const account = await refreshAccount();
+    const found = await fetchPost(id);
+    if (!found) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
+    const action = bookmarked ? "Bookmark" : "Remove bookmark";
+    const content = `@${found.author}: ${displayText(truncate(fullText(found.post), false))}`;
+    const method = bookmarked ? "POST" : "DELETE";
+    const path = bookmarked ? `/2/users/${account.id}/bookmarks` : `/2/users/${account.id}/bookmarks/${id}`;
+    const body = bookmarked ? { tweet_id: id } : undefined;
+    if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method, path, ...(body ? { body } : {}) }], RATES.bookmark, recorded, { target: content });
+    await gate(action, account, { content }, RATES.bookmark);
+    const check = "Check with `x-axi bookmarks`";
+    const response = await send(method, path, body, name, RATES.bookmark, check);
+    if ((response.body["data"] as Json | undefined)?.["bookmarked"] !== bookmarked) throw outcomeUnknown(`X did not confirm the ${name}`, check);
+    return { post: { id, status: bookmarked ? "bookmarked" : "not bookmarked" }, est_cost: money(RATES.bookmark) };
+  };
+
+  const setMute = async (args: string[], muted: boolean): Promise<Output> => {
+    const name = muted ? "mute" : "unmute";
+    const parsed = parseArgs(args, name, [], [DRY_RUN]);
+    const handle = parseHandle(onePositional(parsed, name));
+    await requireScopes(SCOPES_FOR.muteWrite, `\`${name}\``);
+    const account = await refreshAccount();
+    const target = await resolveUser(handle);
+    const usd = muted ? RATES.userInteraction : RATES.muteDelete;
+    const action = muted ? "Mute" : "Unmute";
+    const method = muted ? "POST" : "DELETE";
+    const path = muted ? `/2/users/${account.id}/muting` : `/2/users/${account.id}/muting/${target.id}`;
+    const body = muted ? { target_user_id: target.id } : undefined;
+    if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method, path, ...(body ? { body } : {}) }], usd, recorded, { target: `@${target.username}` });
+    await gate(action, account, { content: `@${target.username}` }, usd);
+    const check = "Check with `x-axi mutes`";
+    const response = await send(method, path, body, name, usd, check);
+    if ((response.body["data"] as Json | undefined)?.["muting"] !== muted) throw outcomeUnknown(`X did not confirm the ${name}`, check);
+    return { [name]: { handle: `@${target.username}`, status: muted ? "muted" : "not muted" }, est_cost: money(usd) };
+  };
+
+  const listCommand = async (args: string[]): Promise<Output> => {
+    const [sub, ...rest] = args;
+    const command = `list ${sub ?? ""}`.trim();
+    if (sub === "view" || sub === "members") {
+      const parsed = parseArgs(rest, command, flagsForList, sub === "view" ? ["--full"] : []);
+      const id = parseListId(onePositional(parsed, command));
+      const limit = parseLimit(parsed, 20, 1, LIST_PAGE_MAX);
+      await requireScopes(SCOPES_FOR.listRead, `\`${command}\``);
+      const q = pagedQuery(limit, parsed.flags.get("--next"));
+      const out = sub === "view"
+        ? await postPage(`/2/lists/${id}/tweets?${q}&${POST_FIELDS}`, RATES.postRead, "list_view", "0 posts in this List", parsed.flags.has("--full"))
+        : await userPageOf(`/2/lists/${id}/members?${q}`, RATES.userRead, "list_members", "0 members in this List");
+      return { list: id, ...out, help: nextHelp(`x-axi ${command} ${id} --limit ${limit}`, out["next_token"]) };
+    }
+    if (sub === "create") {
+      const parsed = parseArgs(rest, command, ["--description"], ["--private", DRY_RUN]);
+      if (parsed.positional.length !== 1) throw usage("`list create` takes one name; quote it if it contains spaces", [HELP["list"] as string]);
+      const name = parseShortText(parsed.positional[0], "the List name", LIST_NAME_MAX);
+      const rawDescription = parsed.flags.get("--description");
+      const description = rawDescription === undefined ? undefined : parseShortText(String(rawDescription), "--description", LIST_DESCRIPTION_MAX);
+      const isPrivate = parsed.flags.has("--private");
+      await requireScopes(SCOPES_FOR.listWrite, "`list create`");
+      const account = await refreshAccount();
+      const body = { name, ...(description !== undefined ? { description } : {}), private: isPrivate };
+      const action = `Create ${isPrivate ? "private" : "public"} List`;
+      const content = [`Name: ${name}`, `Description: ${description ?? "(none)"}`].join("\n");
+      if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method: "POST", path: "/2/lists", body }], RATES.listCreate, recorded, { target: content });
+      await gate(action, account, { content }, RATES.listCreate);
+      const check = "Check with `x-axi lists`";
+      const response = await send("POST", "/2/lists", body, "list_create", RATES.listCreate, check);
+      const data = response.body["data"] as Json | undefined;
+      if (!data?.["id"]) throw outcomeUnknown("X accepted the request but returned no List ID", check);
+      const id = String(data["id"]);
+      return {
+        list: { id, name: String(data["name"] ?? name), private: isPrivate, status: "created" },
+        est_cost: money(RATES.listCreate),
+        help: [`Run \`x-axi list add ${id} <handle>\` to add a member`],
+      };
+    }
+    if (sub === "delete") {
+      const parsed = parseArgs(rest, command, [], [DRY_RUN]);
+      const id = parseListId(onePositional(parsed, command));
+      await requireScopes(SCOPES_FOR.listWrite, "`list delete`");
+      const account = await refreshAccount();
+      const list = await fetchList(id);
+      if (!list) return { list: { id, status: "already gone (no-op)" }, est_cost: money(recorded) };
+      const content = describeList(list);
+      if (parsed.flags.has(DRY_RUN)) return dryRunOutput("Delete List", account, [{ method: "DELETE", path: `/2/lists/${id}` }], RATES.listManage, recorded, { target: content });
+      await gate("Delete List", account, { content }, RATES.listManage);
+      const check = "Check with `x-axi lists`";
+      const response = await send("DELETE", `/2/lists/${id}`, undefined, "list_delete", RATES.listManage, check);
+      if ((response.body["data"] as Json | undefined)?.["deleted"] !== true) throw outcomeUnknown("X did not confirm the deletion", check);
+      return { list: { id, status: "deleted" }, est_cost: money(RATES.listManage) };
+    }
+    if (sub === "add" || sub === "remove") {
+      const parsed = parseArgs(rest, command, [], [DRY_RUN]);
+      if (parsed.positional.length !== 2) throw usage(`\`${command}\` takes a List and a handle`, [HELP["list"] as string]);
+      const id = parseListId(parsed.positional[0]);
+      const handle = parseHandle(parsed.positional[1]);
+      await requireScopes(SCOPES_FOR.listWrite, `\`${command}\``);
+      const account = await refreshAccount();
+      const list = await fetchList(id);
+      if (!list) throw new AxiError(`List ${id} not found`, "NOT_FOUND");
+      const target = await resolveUser(handle);
+      const adding = sub === "add";
+      const action = adding ? "Add member to List" : "Remove member from List";
+      const content = `@${target.username} ${adding ? "to" : "from"} ${describeList(list)}`;
+      const method = adding ? "POST" : "DELETE";
+      const path = adding ? `/2/lists/${id}/members` : `/2/lists/${id}/members/${target.id}`;
+      const body = adding ? { user_id: target.id } : undefined;
+      if (parsed.flags.has(DRY_RUN)) return dryRunOutput(action, account, [{ method, path, ...(body ? { body } : {}) }], RATES.listManage, recorded, { target: content });
+      await gate(action, account, { content }, RATES.listManage);
+      const check = `Check with \`x-axi list members ${id}\``;
+      const response = await send(method, path, body, adding ? "list_add" : "list_remove", RATES.listManage, check);
+      if ((response.body["data"] as Json | undefined)?.["is_member"] !== adding) throw outcomeUnknown(`X did not confirm the ${adding ? "addition" : "removal"}`, check);
+      return { list_member: { list: id, handle: `@${target.username}`, status: adding ? "member" : "not a member" }, est_cost: money(RATES.listManage) };
+    }
+    throw usage("expected `list view`, `list members`, `list create`, `list delete`, `list add`, or `list remove`", [HELP["list"] as string]);
+  };
+
+  const trends = async (args: string[]): Promise<Output> => {
+    const parsed = parseArgs(args, "trends", ["--woeid", "--limit"]);
+    if (parsed.positional.length) throw usage("`trends` takes no arguments; pass --woeid N for a place", [HELP["trends"] as string]);
+    const rawWoeid = parsed.flags.get("--woeid");
+    const woeid = rawWoeid === undefined ? undefined : Number(rawWoeid);
+    if (woeid !== undefined && (!Number.isInteger(woeid) || woeid < 1 || woeid > 2_147_483_647)) throw usage("--woeid must be a positive integer, such as 1 for worldwide or 23424977 for the United States");
+    if (woeid === undefined && parsed.flags.has("--limit")) throw usage("--limit applies only with --woeid; personalized trends come as X returns them");
+    const limit = parseLimit(parsed, 20, 1, WOEID_TRENDS_MAX);
+    const path = woeid === undefined
+      ? "/2/users/personalized_trends?personalized_trend.fields=category,post_count,trend_name,trending_since"
+      : `/2/trends/by/woeid/${woeid}?max_trends=${limit}&trend.fields=trend_name,tweet_count`;
+    const { body } = await get(deps, path);
+    const data = body["data"];
+    // These responses have no meta to count with; a data array, or a body with neither data nor errors, is X's answer.
+    if (!Array.isArray(data) && Array.isArray(body["errors"])) throw unreadable("trends", body);
+    const rows: Output[] = ((Array.isArray(data) ? data : []) as Json[]).map((trend) =>
+      woeid === undefined
+        ? { name: String(trend["trend_name"] ?? ""), category: String(trend["category"] ?? ""), posts: String(trend["post_count"] ?? ""), since: String(trend["trending_since"] ?? "") }
+        : { name: String(trend["trend_name"] ?? ""), posts: typeof trend["tweet_count"] === "number" ? trend["tweet_count"] : "unknown" },
+    );
+    const partial = Array.isArray(data) && Array.isArray(body["errors"]) ? (body["errors"] as Json[]).length : 0;
+    return {
+      ...(woeid === undefined ? { trends_for: "you (personalized)" } : { woeid }),
+      ...(rows.length ? { count: rows.length, trends: rows } : { trends: "0 trends found" }),
+      ...(partial ? { partial_errors: `${partial}: ${errorDetail(body)}` } : {}),
+      ...charge("trends", RATES.trends),
+      help: [rows.length ? "Run `x-axi search <trend name>` for recent posts on one; each result costs about $0.005" : "X billed this request although it returned no trends"],
+    };
+  };
+
   const commands: Record<string, (args: string[]) => Promise<Output> | Output> = {
     me: async (args) => {
       parseArgs(args, "me", []);
@@ -829,6 +1105,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const found = await fetchPost(id);
       if (!found) throw new AxiError(`post ${id} not found`, "NOT_FOUND");
       const metrics = (found.post["public_metrics"] ?? {}) as Json;
+      // public_metrics comes with tweet.fields and needs no other scope or read. The reference names reposts repost_count; X has also sent retweet_count.
+      const returned = (name: string, field: string): Output => (typeof metrics[field] === "number" ? { [name]: metrics[field] } : {});
       return {
         post: {
           id,
@@ -837,7 +1115,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
           text: truncate(fullText(found.post), parsed.flags.has("--full")),
           replies: metrics["reply_count"] ?? 0,
           likes: metrics["like_count"] ?? 0,
-          reposts: metrics["retweet_count"] ?? 0,
+          reposts: metrics["repost_count"] ?? metrics["retweet_count"] ?? 0,
+          ...returned("quotes", "quote_count"),
+          ...returned("bookmarks", "bookmark_count"),
+          ...returned("impressions", "impression_count"),
           conversation: found.post["conversation_id"],
         },
         est_cost: money(recorded),
@@ -871,7 +1152,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         const account = await refreshAccount();
         const target = await resolveUser(handle);
         if (parsed.flags.has(DRY_RUN)) {
-          return dryRunOutput(`DM to @${target.username}`, account, [{ method: "POST", path: `/2/dm_conversations/with/${target.id}/messages`, body: { text } }], RATES.dmCreate, recorded, linuxDialogReport(approvalRequest(`DM to @${target.username}`, account, { text }, RATES.dmCreate)));
+          return dryRunOutput(`DM to @${target.username}`, account, [{ method: "POST", path: `/2/dm_conversations/with/${target.id}/messages`, body: { text } }], RATES.dmCreate, recorded, linuxDialogReport(approvalRequest(`DM to @${target.username}`, account, { text }, RATES.dmCreate), platform));
         }
         await gate(`DM to @${target.username}`, account, { text }, RATES.dmCreate);
         const check = `Check with \`x-axi dm read ${target.username}\``;
@@ -904,13 +1185,17 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       throw usage("expected `dm list`, `dm read`, or `dm send`", [HELP["dm"] as string]);
     },
     post: async (args) => {
-      const parsed = parseArgs(args, "post", ["--quote", "--media"], [DRY_RUN]);
+      const parsed = parseArgs(args, "post", ["--quote", "--media", "--poll", "--poll-minutes"], [DRY_RUN]);
       const count = parsed.positional.length;
       if (count > 1 || (count === 0 && !parsed.flags.has("--media"))) throw usage("quote the post text as one argument", [HELP["post"] as string]);
       const text = count ? parseOutgoingText(parsed.positional[0]) : undefined;
       const quoteFlag = parsed.flags.get("--quote");
       const quote = quoteFlag === undefined ? undefined : parsePostId(String(quoteFlag));
       if (quote && text === undefined) throw usage("--quote needs text");
+      const pollFlag = parsed.flags.get("--poll");
+      if (pollFlag === undefined && parsed.flags.has("--poll-minutes")) throw usage("--poll-minutes needs --poll");
+      if (pollFlag !== undefined && (parsed.flags.has("--media") || quote)) throw usage("--poll cannot be combined with --media or --quote; X attaches one kind of thing to a post");
+      const poll: Poll | undefined = pollFlag === undefined ? undefined : { options: parsePollOptions(String(pollFlag)), duration_minutes: parsePollMinutes(parsed.flags.get("--poll-minutes")) };
       const media = await prepareMedia(parsed);
       const account = await refreshAccount();
       let context: string | undefined;
@@ -919,7 +1204,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
         if (!quoted) throw new AxiError(`post ${quote} not found`, "NOT_FOUND");
         context = `Quoting @${quoted.author}: ${displayText(fullText(quoted.post))}`;
       }
-      const draft = { ...(text !== undefined ? { text } : {}), ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(context ? { context } : {}), dryRun: parsed.flags.has(DRY_RUN) };
+      const draft = { ...(text !== undefined ? { text } : {}), ...(quote ? { quote } : {}), ...(media ? { media } : {}), ...(poll ? { poll } : {}), ...(context ? { context } : {}), dryRun: parsed.flags.has(DRY_RUN) };
       return createPost(draft, account, estimatePostCost(text ?? "", false));
     },
     reply: async (args) => {
@@ -956,7 +1241,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
           path: "/2/tweets",
           body: { text, ...(index ? { reply: { in_reply_to_tweet_id: `<id of part ${index}>` } } : {}) },
         }));
-        return dryRunOutput(action, account, wouldSend, total, recorded, linuxDialogReport(approvalRequest(action, account, { text: content }, total)));
+        return dryRunOutput(action, account, wouldSend, total, recorded, linuxDialogReport(approvalRequest(action, account, { text: content }, total), platform));
       }
       // As text, not content: a dialog may clip content, but every part of a thread is published, so it must show whole or be refused.
       await gate(action, account, { text: content }, total);
@@ -997,6 +1282,56 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     },
     repost: (args) => setRepost(args, true),
     unrepost: (args) => setRepost(args, false),
+    bookmarks: async (args) => {
+      const parsed = parseArgs(args, "bookmarks", flagsForList, ["--full"]);
+      if (parsed.positional.length) throw usage("`bookmarks` takes no arguments");
+      const limit = parseLimit(parsed, 20, 1, 100);
+      await requireScopes(SCOPES_FOR.bookmarks, "`bookmarks`");
+      const account = await me();
+      const q = pagedQuery(limit, parsed.flags.get("--next"));
+      const out = await postPage(`/2/users/${account.id}/bookmarks?${q}&${POST_FIELDS}`, RATES.ownedRead, "bookmarks", "0 bookmarks found", parsed.flags.has("--full"));
+      return { account: `@${account.username}`, ...out, help: [...nextHelp(`x-axi bookmarks --limit ${limit}`, out["next_token"]), "Run `x-axi unbookmark <post>` to remove one, after approval"] };
+    },
+    bookmark: (args) => setBookmark(args, true),
+    unbookmark: (args) => setBookmark(args, false),
+    likes: async (args) => {
+      const parsed = parseArgs(args, "likes", flagsForList, ["--full"]);
+      const positional = onePositional(parsed, "likes");
+      const handle = positional === undefined ? undefined : parseHandle(positional);
+      const limit = parseLimit(parsed, 20, 5, 100);
+      await requireScopes(SCOPES_FOR.likes, "`likes`");
+      const target = await whose(handle);
+      const q = pagedQuery(limit, parsed.flags.get("--next"));
+      const out = await postPage(`/2/users/${target.id}/liked_tweets?${q}&${POST_FIELDS}`, target.own ? RATES.ownedRead : RATES.likeRead, "likes", `0 liked posts found for @${target.username}`, parsed.flags.has("--full"));
+      return { target: `@${target.username}`, ...out, help: nextHelp(`x-axi likes${handle ? ` ${handle}` : ""} --limit ${limit}`, out["next_token"]) };
+    },
+    lists: async (args) => {
+      const parsed = parseArgs(args, "lists", flagsForList);
+      const positional = onePositional(parsed, "lists");
+      const handle = positional === undefined ? undefined : parseHandle(positional);
+      const limit = parseLimit(parsed, 20, 1, LIST_PAGE_MAX);
+      await requireScopes(SCOPES_FOR.listRead, "`lists`");
+      const target = await whose(handle);
+      const { body } = await get(deps, `/2/users/${target.id}/owned_lists?${pagedQuery(limit, parsed.flags.get("--next"))}&list.fields=member_count,private`);
+      const rows = ((body["data"] as Json[] | undefined) ?? []).map((list) => ({
+        id: String(list["id"]),
+        name: String(list["name"] ?? ""),
+        members: typeof list["member_count"] === "number" ? list["member_count"] : "unknown",
+        private: list["private"] === true,
+      }));
+      const out = listOutput("lists", rows, body, `0 Lists owned by @${target.username}`, charge("lists", rows.length * (target.own ? RATES.ownedRead : RATES.listRead)));
+      return {
+        target: `@${target.username}`,
+        ...out,
+        help: [...nextHelp(`x-axi lists${handle ? ` ${handle}` : ""} --limit ${limit}`, out["next_token"]), rows.length ? "Run `x-axi list view <id>` for a List's posts, or `x-axi list members <id>`" : "Run `x-axi list create <name>` to make one, after approval"],
+      };
+    },
+    list: listCommand,
+    mutes: (args) => ownUsers(args, "mutes", "muting", RATES.muteRead, SCOPES_FOR.mutes),
+    mute: (args) => setMute(args, true),
+    unmute: (args) => setMute(args, false),
+    blocks: (args) => ownUsers(args, "blocks", "blocking", RATES.blockRead, SCOPES_FOR.blocks),
+    trends,
     delete: async (args) => {
       const parsed = parseArgs(args, "delete", [], [DRY_RUN]);
       const id = parsePostId(onePositional(parsed, "delete"));
@@ -1129,10 +1464,16 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       spend("api", null);
       return response.body;
     },
-    update: () => {
-      throw new AxiError("x-axi is not published to a package registry and does not update itself", "UPDATE_FROM_GIT", [
-        "In your x-axi checkout, run `git pull && pnpm install --frozen-lockfile && pnpm run build`",
-      ]);
+    update: (args) => {
+      parseArgs(args, "update", []);
+      return {
+        update: {
+          installed: VERSION,
+          from_npm: `npm install -g ${NPM_PACKAGE}@latest`,
+          from_source: "git pull && pnpm install --frozen-lockfile && pnpm run build",
+        },
+        help: ["x-axi installs nothing itself; run the line for how you installed it, in your own terminal", "Run `x-axi --version` afterwards to confirm"],
+      };
     },
     setup: async (args) => {
       parseArgs(args, "setup", []);

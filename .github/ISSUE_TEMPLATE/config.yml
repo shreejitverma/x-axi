@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/shreejitverma/x-axi/security/advisories/new
+    about: Token handling, the keystore, the approval gate, or dialog spoofing. Reported privately.

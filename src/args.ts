@@ -66,6 +66,13 @@ export function parsePostId(value: string | undefined): string {
   return match[1];
 }
 
+/** Accepts a numeric List ID or a List URL such as https://x.com/i/lists/123. */
+export function parseListId(value: string | undefined): string {
+  const match = value?.match(/^(?:https?:\/\/(?:www\.)?(?:x|twitter)\.com\/i\/lists\/)?(\d{1,19})(?:[/?].*)?$/);
+  if (!match?.[1]) throw usage(`expected a List ID or URL such as https://x.com/i/lists/123, got: ${value ?? "nothing"}`);
+  return match[1];
+}
+
 export function parseHandle(value: string | undefined): string {
   const handle = value?.replace(/^@/, "") ?? "";
   if (!/^\w{1,15}$/.test(handle)) throw usage(`expected an X handle, got: ${value ?? "nothing"}`);
@@ -156,4 +163,46 @@ export function onePositional(parsed: Parsed, command: string): string | undefin
     throw usage(`\`${command}\` takes one argument; quote it if it contains spaces`);
   }
   return parsed.positional[0];
+}
+
+/**
+ * One line of text X will publish that has a documented length range, such as a List name or a poll option.
+ * Characters are counted as code points; X may count some characters as two and refuses what it does not accept.
+ */
+export function parseShortText(value: string | undefined, what: string, max: number): string {
+  const text = value ?? "";
+  const length = Array.from(text).length;
+  if (length < 1 || length > max) throw usage(`${what} must be 1 to ${max} characters, got ${length}`);
+  if (/[\r\n]/.test(text)) throw usage(`${what} must be one line`);
+  try {
+    return parseOutgoingText(text);
+  } catch (error) {
+    throw usage(`${what}: ${(error as Error).message}`);
+  }
+}
+
+// From the create post reference: 2 to 4 options of 1 to 25 characters, open 5 to 10080 minutes.
+const POLL_OPTIONS_MIN = 2;
+const POLL_OPTIONS_MAX = 4;
+const POLL_OPTION_MAX_CHARS = 25;
+export const POLL_MINUTES_MIN = 5;
+export const POLL_MINUTES_MAX = 10_080;
+export const POLL_MINUTES_DEFAULT = 1440;
+
+/** `--poll "yes|no|maybe"`: options separated by `|`, with the spaces around each trimmed. */
+export function parsePollOptions(raw: string): string[] {
+  const options = raw.split("|").map((option) => option.trim());
+  if (options.length < POLL_OPTIONS_MIN || options.length > POLL_OPTIONS_MAX) {
+    throw usage(`--poll needs ${POLL_OPTIONS_MIN} to ${POLL_OPTIONS_MAX} options separated by |, got ${options.length}`);
+  }
+  return options.map((option, index) => parseShortText(option, `poll option ${index + 1}`, POLL_OPTION_MAX_CHARS));
+}
+
+export function parsePollMinutes(raw: string | true | undefined): number {
+  if (raw === undefined) return POLL_MINUTES_DEFAULT;
+  const minutes = Number(raw);
+  if (!Number.isInteger(minutes) || minutes < POLL_MINUTES_MIN || minutes > POLL_MINUTES_MAX) {
+    throw usage(`--poll-minutes must be an integer from ${POLL_MINUTES_MIN} to ${POLL_MINUTES_MAX} (7 days)`);
+  }
+  return minutes;
 }

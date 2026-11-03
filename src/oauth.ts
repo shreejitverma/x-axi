@@ -16,13 +16,33 @@ export const X_OAUTH: OAuthEndpoints = {
 };
 
 /**
- * What the commands call, checked against each endpoint's documented scopes:
+ * What the commands call, checked against each endpoint's documented scopes on 2026-11-03:
  * reads and posting (tweet.read, tweet.write, users.read), hide and unhide (tweet.moderate.write),
  * following and followers lists (follows.read), follow and unfollow (follows.write), media upload (media.write),
- * DMs (dm.read, dm.write), and a refresh token (offline.access).
+ * DMs (dm.read, dm.write), bookmarks (bookmark.read, bookmark.write), liked posts (like.read),
+ * Lists (list.read, list.write), mutes (mute.read, mute.write), blocked accounts (block.read), and a refresh token (offline.access).
  * The `api` command can reach only endpoints these scopes cover.
  */
-export const SCOPES = ["tweet.read", "tweet.write", "tweet.moderate.write", "users.read", "follows.read", "follows.write", "media.write", "dm.read", "dm.write", "offline.access"];
+export const SCOPES = [
+  "tweet.read",
+  "tweet.write",
+  "tweet.moderate.write",
+  "users.read",
+  "follows.read",
+  "follows.write",
+  "media.write",
+  "dm.read",
+  "dm.write",
+  "bookmark.read",
+  "bookmark.write",
+  "like.read",
+  "list.read",
+  "list.write",
+  "mute.read",
+  "mute.write",
+  "block.read",
+  "offline.access",
+];
 
 export function base64url(bytes: Buffer): string {
   return bytes.toString("base64url");
