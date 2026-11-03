@@ -15,7 +15,7 @@ jobs:
         node: [20, 24]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # Standalone because pnpm 11 cannot run on Node 20; its own Node stays separate from the matrix version.
       - uses: pnpm/action-setup@v6
