@@ -45,7 +45,7 @@
     "prepublishOnly": "pnpm run clean && pnpm run build && pnpm test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "dependencies": {
     "@toon-format/toon": "^4.4.0",

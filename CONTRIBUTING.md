@@ -2,7 +2,7 @@
 
 ## Setup
 
-x-axi needs Node 20 or newer, and pnpm 11 through the `packageManager` field in `package.json`.
+x-axi needs Node 22.12 or newer, and pnpm 11 through the `packageManager` field in `package.json`.
 pnpm 11 itself needs Node 22.13 or newer; on an older Node, install pnpm's standalone `@pnpm/exe` build.
 
 ```sh
