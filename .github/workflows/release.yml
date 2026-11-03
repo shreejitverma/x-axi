@@ -62,10 +62,32 @@ jobs:
       # X_AXI_TEST_DIALOG stays unset, so no test opens a real dialog here.
       - run: pnpm test
 
+      # A rerun, or a tag for a version first published by hand, must not fail on a publish npm already has.
+      # Only a clean 404 from the registry counts as unpublished; any other lookup failure stops the release.
+      - name: Check whether this version is already on npm
+        id: npm
+        run: |
+          spec="$(node -p "const p=require('./package.json'); p.name + '@' + p.version")"
+          if out="$(npm view "${spec}" version 2>&1)"; then
+            echo "::notice::${spec} is already on npm; skipping publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "${out}" | grep -q 'E404'; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not check npm for ${spec}: ${out}"
+            exit 1
+          fi
+
       # prepublishOnly cleans, rebuilds, and tests again from the same checkout.
-      - run: npm publish --provenance --access public
+      - if: steps.npm.outputs.published == 'false'
+        run: npm publish --provenance --access public
 
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "::notice::release ${GITHUB_REF_NAME} already exists"
+          else
+            gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+          fi
