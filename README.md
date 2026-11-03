@@ -17,7 +17,6 @@ x-axi mentions --limit 5                     # $0.001 per post plus $0.01 per au
 x-axi post "hello from x-axi" --dry-run      # the exact request and cost, with no dialog and no write
 ```
 
-The npm package exists only after the first publish, which has not happened yet; until then, install from source as [Install](#install) shows.
 The client ID comes from an app you create once at <https://console.x.com>, as [Connect your account](#connect-your-account) describes.
 Pay-per-use API calls are billed to that app, so set a spend limit there first.
 
@@ -39,7 +38,6 @@ Pay-per-use API calls are billed to that app, so set a spend limit there first.
 npm install -g @shreejitverma/x-axi
 ```
 
-The npm package exists only after the first publish, which has not happened yet, so until then install from source as shown below.
 Node 20 or newer.
 The package installs one command, `x-axi`.
 `x-axi update` prints the installed version and the update command for npm and for a git checkout; it installs nothing itself.

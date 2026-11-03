@@ -21,17 +21,17 @@ jobs:
       id-token: write
       contents: write
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # Full history, so the tag can be checked against main.
           fetch-depth: 0
 
       # Standalone as in ci.yml; with no version input it installs the packageManager version from package.json.
-      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6.0.10
         with:
           standalone: true
 
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version: 24
           cache: pnpm
@@ -62,10 +62,32 @@ jobs:
       # X_AXI_TEST_DIALOG stays unset, so no test opens a real dialog here.
       - run: pnpm test
 
+      # A rerun, or a tag for a version first published by hand, must not fail on a publish npm already has.
+      # Only a clean 404 from the registry counts as unpublished; any other lookup failure stops the release.
+      - name: Check whether this version is already on npm
+        id: npm
+        run: |
+          spec="$(node -p "const p=require('./package.json'); p.name + '@' + p.version")"
+          if out="$(npm view "${spec}" version 2>&1)"; then
+            echo "::notice::${spec} is already on npm; skipping publish"
+            echo "published=true" >> "$GITHUB_OUTPUT"
+          elif printf '%s' "${out}" | grep -q 'E404'; then
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::could not check npm for ${spec}: ${out}"
+            exit 1
+          fi
+
       # prepublishOnly cleans, rebuilds, and tests again from the same checkout.
-      - run: npm publish --provenance --access public
+      - if: steps.npm.outputs.published == 'false'
+        run: npm publish --provenance --access public
 
       - name: Create the GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+        run: |
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "::notice::release ${GITHUB_REF_NAME} already exists"
+          else
+            gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes
+          fi
