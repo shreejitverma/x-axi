@@ -83,6 +83,7 @@ Each release:
    ```
 
 The workflow refuses a tag that differs from `package.json`'s version or points at a commit not on `main`.
-It then installs with the frozen lockfile, builds, tests, publishes with `npm publish --provenance --access public`, and runs `gh release create` with `--generate-notes`.
+It then installs with the frozen lockfile, builds, tests, publishes with `npm publish --provenance --access public` unless the version is already on npm, and runs `gh release create` with `--generate-notes` unless the Release exists.
+A failed npm lookup other than a 404 stops the run before publishing.
 If the publish step fails, nothing reached npm and no Release exists: fix the cause, delete the tag on GitHub and locally, and tag again.
-If the publish succeeded and only the Release step failed, run `gh release create v0.3.0 --generate-notes` by hand, because npm never accepts the same version twice.
+If the publish succeeded and only the Release step failed, rerun the workflow; it skips the publish, because npm never accepts the same version twice, and creates the Release.
