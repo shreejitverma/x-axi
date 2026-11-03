@@ -1,0 +1,71 @@
+name: release
+
+# Publishes to npm with trusted publishing (OIDC, no token secret) and creates the GitHub Release.
+# One-time setup on npmjs.com is described in CONTRIBUTING.md under "Releasing".
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      # id-token mints the OIDC token npm trusted publishing and provenance need; contents creates the Release.
+      id-token: write
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # Full history, so the tag can be checked against main.
+          fetch-depth: 0
+
+      # Standalone as in ci.yml; with no version input it installs the packageManager version from package.json.
+      - uses: pnpm/action-setup@fc06bc1257f339d1d5d8b3a19a8cae5388b55320 # v4.4.0
+        with:
+          standalone: true
+
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6.5.0
+        with:
+          node-version: 24
+          cache: pnpm
+          registry-url: https://registry.npmjs.org
+
+      - name: Check the tag matches package.json and is on main
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          if [ "${GITHUB_REF_NAME}" != "v${version}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match package.json version ${version}"
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+            echo "::error::tag ${GITHUB_REF_NAME} points at a commit that is not on main"
+            exit 1
+          fi
+
+      - name: Check npm supports trusted publishing
+        run: |
+          # Trusted publishing needs npm 11.5.1 or newer.
+          node -e "const [a,b,c]=process.argv[1].split('.').map(Number); process.exit(a>11||(a===11&&(b>5||(b===5&&c>=1)))?0:1)" "$(npm --version)" \
+            || { echo "::error::npm $(npm --version) is older than 11.5.1, which trusted publishing needs"; exit 1; }
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: pnpm run build
+
+      # X_AXI_TEST_DIALOG stays unset, so no test opens a real dialog here.
+      - run: pnpm test
+
+      # prepublishOnly cleans, rebuilds, and tests again from the same checkout.
+      - run: npm publish --provenance --access public
+
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" --verify-tag --generate-notes

@@ -8,6 +8,7 @@ import { join, resolve } from "node:path";
 import { afterAll, beforeAll, expect, it } from "vitest";
 
 const BIN = resolve("dist/bin/x-axi.js");
+const PACKAGE = JSON.parse(readFileSync(resolve("package.json"), "utf8")) as { version: string };
 let dir: string;
 let server: Server;
 let base: string;
@@ -22,6 +23,8 @@ beforeAll(async () => {
     else if (req.url?.startsWith("/2/users/1/mentions")) res.end('{"data":[{"id":"5","text":"@shreejit hi","author_id":"9"}],"includes":{"users":[{"id":"9","username":"alice"}]}}');
     else if (req.url === "/2/users/me?user.fields=public_metrics") res.end('{"data":{"id":"1","username":"shreejit","public_metrics":{"following_count":2}}}');
     else if (req.url?.startsWith("/2/users/1/following")) res.end('{"data":[{"id":"9","username":"alice","name":"Alice"},{"id":"10","username":"bob","name":"Bob","protected":true}],"meta":{"result_count":2}}');
+    else if (req.url?.startsWith("/2/users/1/bookmarks?")) res.end('{"data":[{"id":"7","text":"saved post","author_id":"9"}],"includes":{"users":[{"id":"9","username":"alice"}]},"meta":{"result_count":1}}');
+    else if (req.url?.startsWith("/2/users/personalized_trends?")) res.end("{}");
     else if (req.url === "/2/redir") { res.statusCode = 307; res.setHeader("location", "/2/users/me"); res.end(); }
     else { res.statusCode = 500; res.end("{}"); }
   });
@@ -81,20 +84,29 @@ it("refuses to send the token to a non-loopback override", async () => {
   expect(out).toContain("loopback");
 });
 
-it.each([[["update"]], [["update", "--check"]]])("%j points at git and never touches a package manager", async (args) => {
+it("update prints the npm and from-source steps and never runs a package manager", async () => {
   const marker = join(dir, "npm-ran");
   for (const tool of ["npm", "pnpm"]) {
     writeFileSync(join(dir, tool), `#!/bin/sh\ntouch "${marker}"\n`);
     chmodSync(join(dir, tool), 0o755);
   }
   const before = seen.length;
-  const { out, code } = await run(args, { PATH: `${dir}:${process.env["PATH"]}` });
-  expect(code).toBe(1);
-  expect(out).toContain("UPDATE_FROM_GIT");
+  const { out, code } = await run(["update"], { PATH: `${dir}:${process.env["PATH"]}` });
+  expect(code).toBe(0);
+  expect(out).toContain("npm install -g @shreejitverma/x-axi@latest");
   expect(out).toContain("git pull");
-  expect(out).not.toContain("x-axi@latest");
+  expect(out).toContain(`installed: ${PACKAGE.version}`);
+  const check = await run(["update", "--check"], { PATH: `${dir}:${process.env["PATH"]}` });
+  expect(check.code).toBe(2);
+  expect(check.out).toContain("unknown flag --check");
   expect(existsSync(marker)).toBe(false);
   expect(seen.length).toBe(before);
+});
+
+it("reports the version in package.json", async () => {
+  const { out, code } = await run(["--version"]);
+  expect(code).toBe(0);
+  expect(out.trim()).toContain(PACKAGE.version);
 });
 
 it("does not advertise a registry upgrade in help", async () => {
@@ -134,10 +146,39 @@ it("exports the following list through the binary and refuses to overwrite it", 
 
 it("documents the new commands in help", async () => {
   const top = await run(["--help"]);
-  for (const name of ["following", "followers", "follow-plan", "thread", "repost", "--dry-run"]) expect(top.out).toContain(name);
-  for (const [command, flag] of [["post", "--media"], ["post", "--quote"], ["follow-plan", "--max-spend"], ["following", "--all"], ["delete", "--dry-run"]]) {
+  for (const name of ["following", "followers", "follow-plan", "thread", "repost", "--dry-run", "bookmarks", "unbookmark", "likes", "list create", "list remove", "mutes", "unmute", "blocks", "trends", "--poll"]) expect(top.out).toContain(name);
+  for (const [command, flag] of [["post", "--media"], ["post", "--quote"], ["post", "--poll-minutes"], ["follow-plan", "--max-spend"], ["following", "--all"], ["delete", "--dry-run"], ["list", "--private"], ["trends", "--woeid"], ["bookmark", "--dry-run"], ["mute", "--dry-run"]]) {
     expect((await run([command as string, "--help"])).out).toContain(flag);
   }
+});
+
+it("reads bookmarks and trends through the binary as TOON, with definitive empty states", async () => {
+  const bookmarks = await run(["bookmarks", "--limit", "1"]);
+  expect(bookmarks.code).toBe(0);
+  expect(bookmarks.out).toContain("saved post");
+  expect(bookmarks.out).toContain("est_cost:");
+  expect(seen.at(-1)?.url).toContain("max_results=1");
+  const trends = await run(["trends"]);
+  expect(trends.code).toBe(0);
+  expect(trends.out).toContain("0 trends found");
+});
+
+it("prints a List write as a dry run through the binary and sends no write", async () => {
+  const before = seen.length;
+  const { out, code } = await run(["list", "create", "Friends", "--private", "--dry-run"]);
+  expect(code).toBe(0);
+  expect(out).toContain("Create private List");
+  expect(out).toContain("/2/lists");
+  expect(out).toContain("write_est_cost: $0.010");
+  expect(seen.slice(before).map((s) => s.method)).toEqual(["GET"]);
+});
+
+it("exits 2 on a bad poll before any call", async () => {
+  const before = seen.length;
+  const { out, code } = await run(["post", "Pick", "--poll", "only one"]);
+  expect(code).toBe(2);
+  expect(out).toContain("2 to 4 options");
+  expect(seen.length).toBe(before);
 });
 
 it("does not follow redirects, and reports them", async () => {

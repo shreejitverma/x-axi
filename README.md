@@ -1,19 +1,56 @@
 # x-axi
 
 An [AXI](https://axi.md) CLI for reading X data and managing your X account from an agent session.
+It reads posts, mentions, bookmarks, likes, Lists, mutes, blocks, trends, and DMs, and it posts, replies, threads, bookmarks, mutes, and manages Lists, each write only after you approve it in a native dialog.
 It signs in to X itself with OAuth 2.0 Authorization Code and PKCE as a public client, and keeps the login in your operating system's keystore.
 There is no client secret, no plain-text token file, and no dependency on another CLI.
+Output is [TOON](https://github.com/toon-format/toon), errors carry a code and an exit status, and every priced result shows its estimated cost.
+
+## Quickstart
+
+```sh
+npm install -g @shreejitverma/x-axi
+x-axi setup                                  # prints the X developer portal steps and your current state
+x-axi login --client-id YOUR_CLIENT_ID       # in your own terminal; opens X's authorize page
+x-axi auth status                            # the account, scopes, and expiry, with no API call
+x-axi mentions --limit 5                     # $0.001 per post plus $0.01 per author, at most $0.055
+x-axi post "hello from x-axi" --dry-run      # the exact request and cost, with no dialog and no write
+```
+
+The client ID comes from an app you create once at <https://console.x.com>, as [Connect your account](#connect-your-account) describes.
+Pay-per-use API calls are billed to that app, so set a spend limit there first.
+
+## Commands
+
+| Group | Commands |
+|---|---|
+| Read | `me`, `timeline`, `mentions`, `replies`, `view`, `search`, `user`, `following`, `followers`, `likes`, `bookmarks`, `lists`, `list view`, `list members`, `mutes`, `blocks`, `trends`, `dm list`, `dm read`, `api`, `spend` |
+| Write, approval required, each takes `--dry-run` | `post` (with `--media`, `--poll`, or `--quote`), `reply`, `thread`, `delete`, `hide`, `unhide`, `repost`, `unrepost`, `follow`, `unfollow`, `follow-file`, `bookmark`, `unbookmark`, `list create`, `list delete`, `list add`, `list remove`, `mute`, `unmute`, `dm send` |
+| Plan, reads X and writes a local file | `follow-plan` |
+| Account | `setup`, `login`, `logout`, `auth status`, `update` |
+
+`x-axi` with no arguments shows the cached account and local spend without an API call.
+`x-axi --help` lists the commands, and `x-axi <command> --help` shows its usage and cost.
 
 ## Install
 
 ```sh
-cd ~/github/x-axi && pnpm install --frozen-lockfile && pnpm run build && npm link
+npm install -g @shreejitverma/x-axi
 ```
 
 Node 20 or newer.
-The install uses pnpm 11, which itself needs Node 22.13 or newer; on an older Node, install pnpm's standalone `@pnpm/exe` build, which brings its own Node.
-To update, run `git pull && pnpm install --frozen-lockfile && pnpm run build` in the checkout.
-`x-axi update` only prints this, because the `x-axi` name on npm does not belong to this project.
+The package installs one command, `x-axi`.
+`x-axi update` prints the installed version and the update command for npm and for a git checkout; it installs nothing itself.
+
+From source:
+
+```sh
+git clone https://github.com/shreejitverma/x-axi.git
+cd x-axi && pnpm install --frozen-lockfile && pnpm run build && npm link
+```
+
+Building from source uses pnpm 11, which itself needs Node 22.13 or newer; on an older Node, install pnpm's standalone `@pnpm/exe` build, which brings its own Node.
+To update a checkout, run `git pull && pnpm install --frozen-lockfile && pnpm run build`.
 
 ## Connect your account
 
@@ -36,9 +73,29 @@ The client ID is not a secret.
 If port 8711 is taken, set `redirect_uri` in the same file to another `http://127.0.0.1` URL with a port from 1024 to 65535.
 Register that exact URI as the Callback URI in the X portal as well, because X refuses a login whose callback differs; `x-axi setup` prints the URI in use.
 
-x-axi requests these scopes: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write media.write dm.read dm.write offline.access`.
+### Scopes
+
+x-axi requests these scopes: `tweet.read tweet.write tweet.moderate.write users.read follows.read follows.write media.write dm.read dm.write bookmark.read bookmark.write like.read list.read list.write mute.read mute.write block.read offline.access`.
 The commands use all of them, and the raw `x-axi api` command can reach only endpoints they cover.
-`media.write` is new: a login made before it was added works for everything except `--media`, which stops with `MISSING_SCOPE` before any spend or dialog until you run `x-axi login` again.
+
+| Scope | Used by |
+|---|---|
+| `tweet.read`, `users.read` | every command that reads or writes |
+| `tweet.write` | `post`, `reply`, `thread`, `delete`, `repost`, `unrepost` |
+| `tweet.moderate.write` | `hide`, `unhide` |
+| `follows.read`, `follows.write` | `following`, `followers`, `follow-plan`; `follow`, `unfollow`, `follow-file` |
+| `media.write` | `post --media`, `reply --media` |
+| `dm.read`, `dm.write` | `dm list`, `dm read`; `dm send` |
+| `bookmark.read`, `bookmark.write` | `bookmarks`; `bookmark`, `unbookmark` |
+| `like.read` | `likes` |
+| `list.read`, `list.write` | `lists`, `list view`, `list members`; `list create`, `list delete`, `list add`, `list remove` |
+| `mute.read`, `mute.write` | `mutes`; `mute`, `unmute` |
+| `block.read` | `blocks` |
+| `offline.access` | the refresh token |
+
+A login made before a scope was added keeps working for everything else.
+A command that needs a scope the login lacks stops with `MISSING_SCOPE` before any API call, spend, or dialog, and says to run `x-axi login` again in your own terminal.
+This applies to `media.write` and to the bookmark, like, List, mute, and block scopes, which version 0.3.0 added.
 
 ### Upgrading from a version that used xurl
 
@@ -52,19 +109,60 @@ Those versions registered a Web App (confidential client) with the callback `htt
 
 The spend ledger, cached account, and follow log in `~/.local/state/x-axi` keep working unchanged.
 
-## Commands
+## Using the commands
 
-| Group | Commands |
-|---|---|
-| Read | `me`, `timeline`, `mentions`, `replies`, `view`, `search`, `user`, `following`, `followers`, `dm list`, `dm read`, `api`, `spend` |
-| Write, approval required, each takes `--dry-run` | `post`, `reply`, `thread`, `delete`, `hide`, `unhide`, `repost`, `unrepost`, `follow`, `unfollow`, `follow-file`, `dm send` |
-| Plan, reads X and writes a local file | `follow-plan` |
-| Account | `setup`, `login`, `logout`, `auth status` |
-
-Reads use the account cached by `login`, the last `me`, or the last write, and timeline, mentions, and search output name it in `account`.
+Reads use the account cached by `login`, the last `me`, or the last write, and timeline, mentions, search, bookmarks, mutes, and blocks output name it in `account`.
 `auth status` shows the account, scopes, access token expiry, and the storage backend without an API call, and never a token.
 `logout` revokes the access and refresh tokens at `https://api.x.com/2/oauth2/revoke`, then deletes the stored login and the cached account.
 If revocation fails the deletion still happens and the output says which revocation failed.
+
+List results show a few fields per item and a `count`, an empty result says so in words, such as `0 bookmarks found`, and a page with more after it gives a `next_token` and the command to continue.
+Long post and DM text is truncated with its full length; `--full` shows all of it.
+
+### Posts and metrics
+
+`x-axi view <post>` shows the post with its public metrics: replies, likes, and reposts, and quotes, bookmarks, and impressions when X returns them.
+They come with the post read itself, at no extra cost and with no extra scope.
+`timeline`, `mentions`, `search`, `replies`, `bookmarks`, `likes`, and `list view` show replies and likes per post.
+
+### Bookmarks and likes
+
+`x-axi bookmarks` shows your bookmarked posts, `--limit` from 1 to 100.
+`x-axi bookmark <post>` and `x-axi unbookmark <post>` add and remove one, each after a dialog that shows the post.
+`x-axi likes [handle]` shows posts an account liked, yours without a handle, `--limit` from 5 to 100.
+x-axi cannot like or unlike, as [X platform limits](#x-platform-limits) explains.
+
+### Lists
+
+`x-axi lists [handle]` shows the Lists an account owns, yours without a handle, with each List's ID, name, member count, and whether it is private.
+`x-axi list view <list>` shows a List's posts and `x-axi list members <list>` its members, `--limit` from 1 to 100.
+A `<list>` is a List ID or a URL such as `https://x.com/i/lists/123`.
+
+- `x-axi list create <name> [--description TEXT] [--private]` creates a List; the name is 1 to 25 characters and the description at most 100, each on one line.
+  Without `--private` the List is public, and the request says `private: false`.
+- `x-axi list delete <list>` deletes one of your Lists; a List that is already gone is a no-op.
+- `x-axi list add <list> <handle>` and `x-axi list remove <list> <handle>` change its members.
+
+Delete, add, and remove first read the List so the dialog can show its name, visibility, and member count, and add and remove look up the handle so the dialog names the member.
+
+### Mutes and blocks
+
+`x-axi mutes` and `x-axi blocks` show the accounts you muted and blocked, `--limit` from 1 to 1000.
+`x-axi mute <handle>` and `x-axi unmute <handle>` change a mute after approval.
+There is no `block` or `unblock`, because X offers them only on Enterprise.
+
+### Trends
+
+`x-axi trends` shows trends personalized for you, with each trend's name, category, post count, and when it started trending.
+`x-axi trends --woeid N [--limit 1-50]` shows trends for a place by its Yahoo WOEID, such as `1` for worldwide or `23424977` for the United States, with each trend's name and post count.
+X bills each request the same, however many trends come back.
+
+### Polls
+
+`x-axi post <text> --poll "Tea|Coffee|Water" [--poll-minutes 5-10080]` attaches a poll of 2 to 4 options, each 1 to 25 characters, open for `--poll-minutes`, default 1440, which is one day.
+Options are separated by `|`, the spaces around each are trimmed, and an option cannot itself contain `|`.
+A poll needs text and cannot be combined with `--media` or `--quote`.
+The dialog's first line shows every option, quoted, and the duration, and a dry run shows them under `dry_run.poll`.
 
 ### Reading following and followers
 
@@ -126,8 +224,9 @@ X checks limits again when media is attached, so a finished upload can still be 
 ### Dry runs
 
 `--dry-run` on any write runs the validation and prints the exact requests and the write's estimated cost, with no approval and no write.
-If the text would not fit the Linux dialog, on any platform the output carries `dry_run.linux_dialog`, because the real run on Linux refuses that text with `APPROVAL_TEXT_TOO_LONG`.
-Reads needed to validate it still happen and are billed, such as the account read, and the parent post on a reply, and they appear as `est_cost`.
+On Linux, if the text would not fit the Linux dialog, the output carries `dry_run.linux_dialog`, because the real run refuses that text with `APPROVAL_TEXT_TOO_LONG`.
+macOS and other systems never show that dialog, so their dry runs leave it out.
+Reads needed to validate it still happen and are billed, such as the account read, the parent post on a reply, the post on a bookmark, and the List and member lookups on a List write, and they appear as `est_cost`.
 Media is inspected locally and no byte is uploaded.
 
 ## Where the login lives
@@ -172,31 +271,38 @@ On Linux the same holds: any process in your session that can talk to the Secret
 The approval dialog on writes is therefore the gate, and it is not a sandbox.
 A process that can run `security` or `secret-tool` as you can act as you on X with these scopes.
 Keep spend limits set in the console.
+Report a vulnerability as [SECURITY.md](SECURITY.md) describes.
 
 ## Safety model
 
-Every write opens a native dialog showing the account, parent post, and estimated cost.
+Every write opens a native dialog showing the account, the target, and estimated cost: the parent post on a reply, the post on a bookmark or repost, the List and member on a List write, and the account on a follow or mute.
 Outgoing text appears in full under a tool-written header with its exact character and line counts, so all of those lines are sent, whatever they say about themselves.
 Invisible characters are refused except where a language or emoji needs them: zero-width joiners in emoji and Indic script text, zero-width non-joiners in Arabic and Indic script text, tag characters in subdivision flags, and direction marks in right-to-left text.
-Bidi embeddings, overrides, and isolates are always refused.
+Bidi embeddings, overrides, and isolates are always refused, in posts, DMs, poll options, and List names and descriptions alike.
 The gate lives in the tool, so it applies under every harness and permission mode, including unattended runs.
 It fails closed: Cancel, a 120-second timeout, a crash, or a missing dialog sends nothing.
 There is no terminal prompt, flag, or environment override, because an agent could answer or set those.
 Writes are never retried, because a retry after a lost response could publish twice.
-A failed response that might have been applied returns `OUTCOME_UNKNOWN`.
+A failed response that might have been applied returns `OUTCOME_UNKNOWN`, and so does a success that does not confirm the change, such as a bookmark answer without `bookmarked: true`.
 
 ## X platform limits
 
-Checked against the [changelog](https://docs.x.com/changelog), [pricing](https://docs.x.com/x-api/getting-started/pricing), [OAuth 2.0 documentation](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code), and [create post reference](https://docs.x.com/x-api/posts/create-post) on 2026-11-01.
+Checked on 2026-11-03 against the [changelog](https://docs.x.com/changelog), [pricing](https://docs.x.com/x-api/getting-started/pricing), [OAuth 2.0 documentation](https://docs.x.com/fundamentals/authentication/oauth-2-0/authorization-code), and the API reference page of each endpoint x-axi calls, such as [create post](https://docs.x.com/x-api/posts/create-post).
 
 - API replies work only on your own posts, or when the post's author mentioned or quoted you.
   Otherwise `reply` returns `REPLY_NOT_SUMMONED` with a browser link holding your text.
 - The April 16, 2026 changelog entry says following, likes, and quote-posts were removed from all self-serve tiers.
   A live follow on a Pay-per-use app still succeeded on 2026-10-31, so following may stop working without notice.
 - x-axi has no `like` or `unlike`, because of that entry.
+  Reading liked posts with `likes` is still documented and priced (Like: Read, and Owned Reads for your own), so it stays, though X may refuse it on self-serve.
 - `post --quote` exists, but the create post reference says `quote_tweet_id` requires an Enterprise plan, so expect `FORBIDDEN` on self-serve; it is untested live.
 - `repost` and `unrepost` use documented endpoints that the removal entry does not name, and the [API overview](https://docs.x.com/x-api/overview) says its endpoints are on pay-per-use, though it also lists likes.
   No page names reposts on pay-per-use specifically and the pricing page has no line for them, so they are untested and unpriced.
+- x-axi has no `block` or `unblock`.
+  The [Blocks introduction](https://docs.x.com/x-api/users/blocks/introduction) lists `GET /2/users/:id/blocking` as Pay-per-use and Enterprise, and `POST /2/users/:id/blocking` and `DELETE /2/users/:source_user_id/blocking/:target_user_id` as Enterprise only; the [Block User reference](https://docs.x.com/x-api/users/block-user) says the same in the [API index](https://docs.x.com/x-api/llms.txt).
+- The [Personalized Trends introduction](https://docs.x.com/x-api/trends/personalized-trends/introduction) lists a Premium user subscription as a requirement, so `trends` without `--woeid` may return `FORBIDDEN` on an account without X Premium.
+- The [Trends by WOEID reference](https://docs.x.com/x-api/trends/get-trends-by-woeid) lists OAuth 2.0 user context and an app Bearer Token, while its [introduction](https://docs.x.com/x-api/trends/trends-by-woeid/introduction) shows only the app token; x-axi sends the user token, which is untested live.
+- Bookmarks, liked posts, Lists, mutes, and trends were added on 2026-11-03 from their API references, and none of them has been run against live X.
 - [Following](https://help.x.com/en/using-x/x-follow-limit) is limited to 400 per day and 50 per 15 minutes, and X may lock accounts for aggressive following.
   `follow-file` asks once per batch, follows every 20 seconds, caps itself at 400 in 24 hours, and stops at the first error.
   Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.
@@ -216,6 +322,8 @@ Checked against the [changelog](https://docs.x.com/changelog), [pricing](https:/
 | Linux without a graphical session, such as plain SSH or CI | None, so writes return `APPROVAL_UNAVAILABLE` naming what to install | |
 | Windows and other systems | None, so writes return `APPROVAL_UNSUPPORTED_PLATFORM` | |
 
+Reads work on every platform that has a keystore, so on Linux they need the Secret Service but no dialog.
+
 On Linux:
 
 - A graphical session means `DISPLAY` or `WAYLAND_DISPLAY` is set, so SSH with X forwarding counts and shows the dialog on the forwarded display.
@@ -226,11 +334,12 @@ On Linux:
 - The dialog holds about 25 lines of 50 columns.
   That is a conservative estimate rather than a measurement of the window, and macOS does not apply it.
 - A word or URL wider than a line is split in the dialog with a `↵` mark at each break, and the dialog counts the breaks; the text sent to X is unchanged.
-- Text you did not write for this action, such as a parent post, a post you are deleting or hiding, or the path of a `follow-file` queue, is cut to fit with a marker giving its full character count, and never blocks the write.
+- Text you did not write for this action, such as a parent post, a post you are deleting, hiding, or bookmarking, or the path of a `follow-file` queue, is cut to fit with a marker giving its full character count, and never blocks the write.
 - Text to send must be shown in full to be approved, so text too long to fit once wrapped returns `APPROVAL_TEXT_TOO_LONG` instead of a dialog.
   The text itself has room for about 19 rows, or about 950 characters of plain text, because the rest of the dialog is held for its other lines and any context.
   The rows of a split URL count toward that limit.
   A `--media` path is shown in the dialog's first lines, so it takes from that room: about 17 rows are left with a short path, and about 13 with a 120-character path.
+  A poll's options are shown in those first lines too, and take from that room the same way.
 - A `zenity` that cannot open its display exits with the same code as Cancel, so x-axi reads its error output and returns `APPROVAL_UNAVAILABLE` rather than reporting a cancel nobody made.
 - The gate is weaker than on macOS.
   Any process running as you can click in an X11 dialog, or set `DISPLAY` to an X server it controls and click there.
@@ -246,10 +355,29 @@ CI installs the standalone pnpm build described under [Install](#install).
 Each priced result shows `est_cost`, and `x-axi spend` totals them locally.
 A write's `est_cost` is the write alone; the lookups before its dialog appear only in `spend`.
 These are upper bounds, because X does not re-bill a resource within a UTC day and may change its rates.
+
+| What | Rate used |
+|---|---|
+| A post read (`view`, `search`, `replies`, `list view`, and the post shown on a write) | $0.005 per post |
+| A user read (`me`, `user`, a handle lookup, each author X includes, `list members`) | $0.010 per account |
+| Following and followers lists | $0.010 per account |
+| Another account's liked posts | $0.001 per post (Like: Read) |
+| Another account's Lists, and the List read before a List write | $0.005 per List |
+| Mutes and blocks | $0.001 per account |
+| Your own timeline, mentions, bookmarks, liked posts, Lists, and following and followers | $0.001 per item (Owned Reads) |
+| `trends` | $0.010 per request |
+| `post`, `reply`, each `thread` part | $0.015, $0.20 with a URL, $0.010 for a summoned reply |
+| `follow`, `mute` | $0.015 |
+| `delete`, `unfollow` | $0.010 |
+| `bookmark`, `unbookmark` | $0.005 |
+| `list create` | $0.010 |
+| `list delete`, `list add`, `list remove` | $0.005 (List: Manage) |
+| `unmute` | $0.005 (Mute: Delete) |
+| `dm send`; DM reads | $0.015; $0.010 per message |
+
 The `hide`, `unhide`, `repost`, `unrepost`, media upload, and `api` calls have no estimate, so they add nothing to these totals and `spend` counts them in `unpriced_calls_30d`.
 The [pricing page](https://docs.x.com/x-api/getting-started/pricing) lists no price for media upload or reposting, so a post with media shows the price of the post alone.
-Following and followers lists cost $0.01 per account.
-Your own list uses the $0.001 Owned Read rate, which X gives only when the login also owns the app, so under another app's login the estimate is low.
+X gives the Owned Read rate only when `{id}` is the logged-in account and that account also owns the app, so under another app's login those estimates are low.
 A write with an unknown outcome is counted, because it may have been billed.
 `login` ends with one account read, about $0.01, so the approval dialogs can name the account the token belongs to.
 The console is the billing truth, and its spend limit is the only hard cap.
@@ -263,4 +391,10 @@ X_AXI_TEST_DIALOG=1 pnpm test     # macOS: also opens a real dialog for one seco
 ```
 
 The suite runs the login flow against a local fake of X's OAuth endpoints with an injected in-memory keystore, checks PKCE against the RFC 7636 appendix B vector, and asserts that the real backends' commands carry the secret on stdin and never on argv.
-Under `X_AXI_API_BASE`, which may only point at loopback, the keystore is never read and a fixed test token is sent.
+Commands run against fakes of X that answer with the shapes in each endpoint's API reference, and no test calls live X.
+Under `X_AXI_API_BASE`, which may only point at loopback, the keystore is never read, a fixed test token is sent, and the login's scopes are unknown, so `MISSING_SCOPE` checks let commands through.
+[CONTRIBUTING.md](CONTRIBUTING.md) has the rules for tests, commits, and releases.
+
+## License
+
+[MIT](LICENSE)

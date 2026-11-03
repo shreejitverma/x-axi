@@ -1,17 +1,52 @@
 {
-  "name": "x-axi",
-  "version": "0.2.0",
-  "private": true,
+  "name": "@shreejitverma/x-axi",
+  "version": "0.3.0",
   "description": "AXI-compliant CLI for X: read data and manage your account, with a human approval gate on every write",
+  "keywords": [
+    "x",
+    "twitter",
+    "x-api",
+    "cli",
+    "axi",
+    "agent",
+    "oauth2",
+    "pkce"
+  ],
+  "author": "Shreejit Verma",
+  "license": "MIT",
+  "homepage": "https://github.com/shreejitverma/x-axi#readme",
+  "bugs": {
+    "url": "https://github.com/shreejitverma/x-axi/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shreejitverma/x-axi.git"
+  },
   "type": "module",
   "packageManager": "pnpm@11.9.0",
-  "bin": { "x-axi": "./dist/bin/x-axi.js" },
-  "scripts": {
-    "build": "tsc",
-    "test": "vitest run"
+  "bin": {
+    "x-axi": "./dist/bin/x-axi.js"
   },
-  "license": "MIT",
-  "engines": { "node": ">=20" },
+  "files": [
+    "dist/bin/*.js",
+    "dist/src/*.js",
+    "skills",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\"",
+    "build": "tsc",
+    "test": "vitest run",
+    "prepublishOnly": "pnpm run clean && pnpm run build && pnpm test"
+  },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
     "@toon-format/toon": "^2.1.0",
     "axi-sdk-js": "^0.1.10"

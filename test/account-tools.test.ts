@@ -11,7 +11,7 @@ type Call = { method: Method; path: string; body?: Json | FormData };
 const ok = (body: Json, status = 200): ApiResponse => ({ status, body });
 const PARENT = ok({ data: { id: "50", text: "parent text", author_id: "9" }, includes: { users: [{ id: "9", username: "alice" }] } });
 
-function harness(handler: (call: Call) => ApiResponse | Promise<ApiResponse>, approval: ApprovalResult = "approved", scopes = ["tweet.write", "media.write"]) {
+function harness(handler: (call: Call) => ApiResponse | Promise<ApiResponse>, approval: ApprovalResult = "approved", scopes = ["tweet.write", "media.write"], platform: NodeJS.Platform = "darwin") {
   const calls: Call[] = [];
   const events: string[] = [];
   const client: XClient = {
@@ -40,7 +40,7 @@ function harness(handler: (call: Call) => ApiResponse | Promise<ApiResponse>, ap
     sleeps.push(ms);
   };
   return {
-    commands: buildCommands({ client, approve, auth, sleep }),
+    commands: buildCommands({ client, approve, auth, sleep, platform }),
     calls,
     events,
     requests,
@@ -550,12 +550,12 @@ describe("--dry-run and the Linux dialog", () => {
     ["a thread of 9 short parts", ["thread", ...parts(9)], true],
   ])("agrees with the dialog the real run would open: %s", async (_name, argv, tooLong) => {
     const [name, ...args] = argv as [string, ...string[]];
-    const real = harness(name === "dm" ? (c) => (c.path.includes("/by/username/") ? ok({ data: { id: "2", username: "bob" } }) : posts(c)) : posts);
+    const real = harness(name === "dm" ? (c) => (c.path.includes("/by/username/") ? ok({ data: { id: "2", username: "bob" } }) : posts(c)) : posts, "approved", undefined, "linux");
     await real.commands[name]!(args);
     // The request the gate really sends decides, read by the code that picks the Linux refusal.
     expect(linuxApprovalText(real.requests[0]!) === null).toBe(tooLong);
 
-    const dry = harness(name === "dm" ? (c) => (c.path.includes("/by/username/") ? ok({ data: { id: "2", username: "bob" } }) : posts(c)) : posts);
+    const dry = harness(name === "dm" ? (c) => (c.path.includes("/by/username/") ? ok({ data: { id: "2", username: "bob" } }) : posts(c)) : posts, "approved", undefined, "linux");
     const out = await dry.commands[name]!([...args, "--dry-run"]);
     expect(dry.approve).not.toHaveBeenCalled();
     expect(dry.writes()).toEqual([]);
@@ -564,8 +564,16 @@ describe("--dry-run and the Linux dialog", () => {
   });
 
   it("names the refusal the real run gives", async () => {
-    const out = await harness(posts).commands["post"]!([long, "--dry-run"]);
+    const out = await harness(posts, "approved", undefined, "linux").commands["post"]!([long, "--dry-run"]);
     expect((out["dry_run"] as Json)["linux_dialog"]).toContain("APPROVAL_TEXT_TOO_LONG");
+  });
+
+  it.each(["darwin", "win32", "freebsd"] as const)("says nothing about the Linux dialog on %s, which never opens it", async (platform) => {
+    const h = harness(posts, "approved", undefined, platform);
+    const out = await h.commands["post"]!([long, "--dry-run"]);
+    expect("linux_dialog" in (out["dry_run"] as Json)).toBe(false);
+    expect((out["help"] as string[]).join(" ")).not.toContain("shorten the text");
+    expect(h.writes()).toEqual([]);
   });
 
   it("does not report media with no text, because that dialog cannot refuse", async () => {

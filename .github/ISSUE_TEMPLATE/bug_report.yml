@@ -1,0 +1,57 @@
+name: Bug report
+description: Something in x-axi does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste an access token, refresh token, client secret, or keychain output here.
+        Report a security problem privately instead: https://github.com/shreejitverma/x-axi/security/advisories/new
+  - type: input
+    id: version
+    attributes:
+      label: x-axi version
+      description: Output of `x-axi --version`.
+      placeholder: "0.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux with zenity
+        - Linux with kdialog
+        - Linux without a graphical session
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: node
+    attributes:
+      label: Node version
+      description: Output of `node --version`.
+    validations:
+      required: true
+  - type: textarea
+    id: command
+    attributes:
+      label: Command and output
+      description: The command you ran and its full output, including `code:` and `help:`. Remove anything private, such as DM text.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+    validations:
+      required: true
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: The output above contains no token, secret, or private message.
+          required: true
