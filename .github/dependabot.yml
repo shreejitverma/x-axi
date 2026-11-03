@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    # pnpm-workspace.yaml refuses any package published less than 7 days ago (minimumReleaseAge 10080),
+    # so CI's `pnpm install --frozen-lockfile` fails on a lockfile that holds one. The cooldown keeps each bump
+    # at least that old; a transitive package Dependabot resolves can still be newer, and then the fix is to
+    # rerun `pnpm install` locally, which resolves within the policy, and commit that lockfile.
+    cooldown:
+      default-days: 7
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
