@@ -57,7 +57,7 @@ Never commit a token, a client secret, or output that holds one.
 
 Releases publish `@shreejitverma/x-axi` to npm from `.github/workflows/release.yml`, with npm trusted publishing and provenance, and create a GitHub Release with generated notes.
 There is no changelog file; the GitHub Release notes are the changelog.
-The release workflow has not run yet, so the steps below are untested until the first tagged release.
+The workflow first ran for `v0.3.0` on 2026-11-03 and skipped its publish step, because that version was already on npm; 0.3.1 is the first version it publishes.
 Version 0.3.0 was published by hand on 2026-11-03, without provenance, because the Trusted Publisher setting lives on an existing package's settings page.
 The workflow skips `npm publish` when the tagged version is already on npm, and skips the GitHub Release when one exists for the tag, so tagging an already-published version such as `v0.3.0` only creates its Release.
 
@@ -65,7 +65,7 @@ One-time setup by the package owner on npmjs.com:
 
 1. Done for 0.3.0: publish the first version from your own machine with `npm login`, then `pnpm install --frozen-lockfile && npm publish --access public --provenance=false`.
    Provenance is off here because it can only be generated in CI.
-2. On <https://www.npmjs.com/package/@shreejitverma/x-axi/access>, under Trusted Publisher, choose GitHub Actions and enter Organization or user `shreejitverma`, Repository `x-axi`, Workflow filename `release.yml`, and no environment.
+2. Done on 2026-11-03: on <https://www.npmjs.com/package/@shreejitverma/x-axi/access>, under Trusted Publisher, choose GitHub Actions and enter Organization or user `shreejitverma`, Repository `x-axi`, Workflow filename `release.yml`, and no environment.
    Under Allowed actions, allow `npm publish`.
    npm expires a new trusted publisher that has not published within 2 days, so tag the next release soon after.
 3. Once a release has gone out through the workflow, set Publishing access to require two-factor authentication and disallow tokens, so only the workflow can publish.
@@ -78,8 +78,8 @@ Each release:
 
    ```sh
    git switch main && git pull
-   git tag v0.3.0
-   git push origin v0.3.0
+   git tag vX.Y.Z
+   git push origin vX.Y.Z
    ```
 
 The workflow refuses a tag that differs from `package.json`'s version or points at a commit not on `main`.
