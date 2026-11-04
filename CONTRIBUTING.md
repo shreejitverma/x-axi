@@ -57,7 +57,7 @@ Never commit a token, a client secret, or output that holds one.
 
 Releases publish `@shreejitverma/x-axi` to npm from `.github/workflows/release.yml`, with npm trusted publishing and provenance, and create a GitHub Release with generated notes.
 There is no changelog file; the GitHub Release notes are the changelog.
-The workflow first ran for `v0.3.0` on 2026-11-03 and skipped its publish step, because that version was already on npm; 0.3.1 is the first version it publishes.
+The workflow first ran for `v0.3.0` on 2026-11-03 and skipped its publish step, because that version was already on npm; 0.4.0 is the first version it publishes.
 Version 0.3.0 was published by hand on 2026-11-03, without provenance, because the Trusted Publisher setting lives on an existing package's settings page.
 The workflow skips `npm publish` when the tagged version is already on npm, and skips the GitHub Release when one exists for the tag, so tagging an already-published version such as `v0.3.0` only creates its Release.
 
