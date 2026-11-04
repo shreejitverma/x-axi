@@ -40,7 +40,6 @@ Nested values, such as the request body in a `--dry-run` preview, now print as n
 Strings that start with `#`, such as trend names, are now quoted.
 A current TOON decoder reads both to the same data as before; a toon 2 decoder cannot parse the nested tabular headers.
 Output for simpler commands, such as `setup`, `--help`, `spend`, `auth status`, and `me`, is unchanged from 0.3.0.
-Version 0.4.0 also raises the Node floor to 22.12.
 
 ## Install
 
