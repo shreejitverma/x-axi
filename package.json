@@ -1,6 +1,6 @@
 {
   "name": "@shreejitverma/x-axi",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "description": "AXI-compliant CLI for X: read data and manage your account, with a human approval gate on every write",
   "keywords": [
     "x",
@@ -45,7 +45,7 @@
     "prepublishOnly": "pnpm run clean && pnpm run build && pnpm test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22.12"
   },
   "dependencies": {
     "@toon-format/toon": "^4.4.0",
@@ -53,7 +53,7 @@
   },
   "devDependencies": {
     "@types/node": "^26.6.5",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vitest": "^5.0.5"
   }
 }

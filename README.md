@@ -32,13 +32,19 @@ Pay-per-use API calls are billed to that app, so set a spend limit there first.
 `x-axi` with no arguments shows the cached account and local spend without an API call.
 `x-axi --help` lists the commands, and `x-axi <command> --help` shows its usage and cost.
 
+## Output format
+
+Output is TOON per the current specification, encoded by `@toon-format/toon` 4.
+Read it with a current TOON decoder.
+For what changed from 0.3, see the [v0.4.0 release notes](https://github.com/shreejitverma/x-axi/releases/tag/v0.4.0).
+
 ## Install
 
 ```sh
 npm install -g @shreejitverma/x-axi
 ```
 
-Node 20 or newer.
+Node 22.12 or newer.
 The package installs one command, `x-axi`.
 `x-axi update` prints the installed version and the update command for npm and for a git checkout; it installs nothing itself.
 
@@ -344,7 +350,7 @@ On Linux:
 - The gate is weaker than on macOS.
   Any process running as you can click in an X11 dialog, or set `DISPLAY` to an X server it controls and click there.
 
-CI runs the suite on Ubuntu and macOS on Node 20 and 24.
+CI runs the suite on Ubuntu and macOS on Node 22, 24, and 26.
 It tests the Linux dialogs with fake executables that record their arguments and exit with a chosen code, so no real click reaches `zenity` or `kdialog` in CI.
 The flags were checked against the help output of `zenity` 4.0.1 and `kdialog` 23.08 and against their upstream source on 2026-11-01.
 Neither real Linux dialog has been opened by the test suite, so how they look on your desktop is unverified.

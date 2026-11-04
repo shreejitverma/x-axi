@@ -12,12 +12,12 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        node: [20, 24]
+        node: [22, 24, 26]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
 
-      # Standalone because pnpm 11 cannot run on Node 20; its own Node stays separate from the matrix version.
+      # Standalone because this step runs before setup-node, which needs pnpm for its cache; pnpm brings its own Node instead of the runner default.
       - uses: pnpm/action-setup@v6
         with:
           standalone: true
