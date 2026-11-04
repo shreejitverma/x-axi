@@ -35,11 +35,8 @@ Pay-per-use API calls are billed to that app, so set a spend limit there first.
 ## Output format
 
 Output is TOON per the current specification, encoded by `@toon-format/toon` 4.
-Version 0.4.0 moved from toon 2 to toon 4, which changes the text of some output but not the data it carries.
-Nested values, such as the request body in a `--dry-run` preview, now print as nested tabular headers like `would_send[1]{method,path,body{text}}:` instead of an indented list.
-Strings that start with `#`, such as trend names, are now quoted.
-A current TOON decoder reads both to the same data as before; a toon 2 decoder cannot parse the nested tabular headers.
-Output for simpler commands, such as `setup`, `--help`, `spend`, `auth status`, and `me`, is unchanged from 0.3.0.
+Read it with a current TOON decoder.
+For what changed from 0.3, see the [v0.4.0 release notes](https://github.com/shreejitverma/x-axi/releases/tag/v0.4.0).
 
 ## Install
 
