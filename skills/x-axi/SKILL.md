@@ -63,6 +63,7 @@ X's docs say personalized `trends` need X Premium on the account, so `FORBIDDEN`
 `repost` and `unrepost` are untested and unpriced in X's docs.
 Replies to other people work only when the author mentioned or quoted the user.
 X can lock accounts for aggressive following, even well under its documented 400 a day, so never loop around `follow-file` limits or errors, and never raise `--daily-cap` or lower `--interval` unless the user asks.
+To continue a queue, run the exact command its help gives, which keeps the user's pacing flags.
 On `ACCOUNT_LOCKED`, stop all writes and tell the user to log in at https://x.com to unlock; only they can.
 `follow-file` counts an account as already followed only if this login followed it through x-axi.
 Build every queue with `x-axi follow-plan <handle> --out queue.json`, which removes accounts the user already follows and holds protected accounts out, or those accounts are followed and billed again.

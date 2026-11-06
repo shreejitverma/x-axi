@@ -853,9 +853,65 @@ describe("follow-file", () => {
   it("shows the pacing it will use in a dry run", async () => {
     const h = run(followOk);
     await expect(h.commands["follow-file"]!([queue(2), "--interval", "90", "--daily-cap", "50", "--dry-run"])).resolves.toMatchObject({
-      dry_run: { pacing: { interval_s: 90, jitter: "up to +50%", daily_cap: 50, room_now: 50 } },
+      dry_run: { pacing: { interval_s: 90, jitter: "up to +50%", first_wait_s: 0, daily_cap: 50, room_now: 50 } },
     });
     expect(h.writes()).toEqual([]);
+  });
+
+  const seedFollowAt = (atMs: number) => writeFileSync(join(dir, "follows.json"), JSON.stringify({ "9000": new Date(atMs).toISOString() }));
+
+  it("repeats the pacing flags the user chose in the command to continue", async () => {
+    const file = queue(3);
+    const h = run(followOk);
+    const out = (await h.commands["follow-file"]!([file, "--max", "1", "--daily-cap", "50", "--interval", "90"])) as { help: string[] };
+    expect(out.help[0]).toContain(`\`x-axi follow-file ${file} --max 1 --daily-cap 50 --interval 90\` to continue; 49 follows left under the 50 per 24 hours cap`);
+  });
+
+  it("repeats the pacing flags in the command to run once the cap reopens", async () => {
+    const file = queue(3);
+    const h = run(followOk);
+    const out = (await h.commands["follow-file"]!([file, "--daily-cap", "1", "--interval", "90"])) as { help: string[] };
+    expect(out.help[0]!.startsWith(`Run \`x-axi follow-file ${file} --daily-cap 1 --interval 90\` after `)).toBe(true);
+    expect(out.help[0]!.endsWith(" to continue")).toBe(true);
+  });
+
+  it("adds no flags to the command to continue when none were given", async () => {
+    const file = queue(60);
+    const h = run(followOk);
+    const out = (await h.commands["follow-file"]!([file])) as { help: string[] };
+    expect(out.help[0]).toContain(`\`x-axi follow-file ${file}\` to continue`);
+  });
+
+  // A rerun right after a follow must still keep the 60 second base gap: 60 - 10 seconds already passed = 50.
+  it.each([
+    [0, 50_000],
+    [1, 80_000],
+  ])("waits out the rest of the gap before the first follow of a rerun (random %s)", async (r, rest) => {
+    seedFollowAt(Date.now() - 10_000);
+    const h = run(followOk, "approved", () => r);
+    await h.commands["follow-file"]!([queue(2)]);
+    expect(h.sleeps).toHaveLength(2);
+    expect(h.sleeps[0]).toBeGreaterThan(rest - 1000);
+    expect(h.sleeps[0]).toBeLessThanOrEqual(rest);
+    expect(h.sleeps[1]).toBe(60_000 * (1 + r / 2));
+  });
+
+  it("does not wait before the first follow when the last one was long ago", async () => {
+    seedFollowAt(Date.now() - 2 * 3600 * 1000);
+    const h = run(followOk);
+    await h.commands["follow-file"]!([queue(2)]);
+    expect(h.sleeps).toEqual([60_000]);
+  });
+
+  it("shows the longest first wait in the dry run and the dialog, and counts it in the estimate", async () => {
+    // 10 seconds after a follow, at most 90 - 10 = 80 seconds remain; on average 75 - 10 = 65, so about 2 minutes.
+    seedFollowAt(Date.now() - 10_000);
+    const h = run(followOk);
+    await expect(h.commands["follow-file"]!([queue(1), "--dry-run"])).resolves.toMatchObject({ dry_run: { pacing: { first_wait_s: 80 } } });
+    await h.commands["follow-file"]!([queue(1)]);
+    const shown = formatApproval(h.requests[0]!);
+    expect(shown).toContain("Follow 1 account over about 2 minutes");
+    expect(shown).toContain("The first follow waits up to 80 seconds after your last one.");
   });
 
   it("stops with ACCOUNT_LOCKED and the unlock step when X locks the account", async () => {

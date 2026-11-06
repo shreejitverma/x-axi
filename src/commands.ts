@@ -233,7 +233,7 @@ export const HELP: Record<string, string> = {
   unrepost: "usage: x-axi unrepost <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. The cost is unknown, as for `repost`.",
   follow: "usage: x-axi follow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.015.",
   unfollow: "usage: x-axi unfollow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.01.",
-  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. Rerun to continue. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
+  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. Rerun to continue; the first follow of a run waits out what is left of one wait since the last follow. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
   bookmarks: "usage: x-axi bookmarks [--limit 1-100] [--next TOKEN] [--full]\nYour bookmarked posts. About $0.001 per post at the Owned Read rate when you own the app, plus $0.01 per author. Needs the bookmark.read scope.",
   bookmark: "usage: x-axi bookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then bookmarks it. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
   unbookmark: "usage: x-axi unbookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then removes the bookmark. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
@@ -1425,19 +1425,26 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const names = batch.slice(0, 10).map((u) => `@${u.username}`).join(", ");
       const more = batch.length > 10 ? `, and ${batch.length - 10} more` : "";
       const provenance = `Usernames come from ${shortenPath(displayText(file))} and were not verified with X.`;
-      // The expected jitter factor is 1 + FOLLOW_JITTER / 2; there is one wait between each pair of follows.
-      const minutes = Math.max(1, Math.ceil(((batch.length - 1) * intervalMs * (1 + FOLLOW_JITTER / 2)) / 60_000));
+      const jitteredWait = (): number => Math.round(intervalMs * (1 + FOLLOW_JITTER * Math.min(Math.max(random(), 0), 1)));
+      // The first follow of a run waits out what is left of a wait since the newest follow, so reruns keep the gap too.
+      const lastAt = recent[recent.length - 1];
+      const leftOf = (waitMs: number): number => (lastAt === undefined ? 0 : Math.max(0, Math.min(waitMs, waitMs - (Date.now() - lastAt))));
+      const meanWait = intervalMs * (1 + FOLLOW_JITTER / 2);
+      const firstWaitS = Math.ceil(leftOf(intervalMs * (1 + FOLLOW_JITTER)) / 1000);
+      const minutes = Math.max(1, Math.ceil((leftOf(meanWait) + (batch.length - 1) * meanWait) / 60_000));
       const action = `Follow ${counted(batch.length, "account")} over about ${counted(minutes, "minute")}`;
       if (parsed.flags.has(DRY_RUN)) {
-        return dryRunOutput(action, account, [{ method: "POST", path: `/2/users/${account.id}/following`, body: "one request per account in batch, as {target_user_id}" }], usd, recorded, { batch, remaining_after: remaining.length - batch.length, pacing: { interval_s: intervalMs / 1000, jitter: `up to +${FOLLOW_JITTER * 100}%`, daily_cap: dailyCap, room_now: room }, provenance });
+        return dryRunOutput(action, account, [{ method: "POST", path: `/2/users/${account.id}/following`, body: "one request per account in batch, as {target_user_id}" }], usd, recorded, { batch, remaining_after: remaining.length - batch.length, pacing: { interval_s: intervalMs / 1000, jitter: `up to +${FOLLOW_JITTER * 100}%`, first_wait_s: firstWaitS, daily_cap: dailyCap, room_now: room }, provenance });
       }
-      await gate(action, account, { content: `${names}${more}\n\n${provenance}` }, usd);
+      const firstWaitNote = firstWaitS > 0 ? `\n\nThe first follow waits up to ${counted(firstWaitS, "second")} after your last one.` : "";
+      await gate(action, account, { content: `${names}${more}\n\n${provenance}${firstWaitNote}` }, usd);
       let followed = 0;
       let requested = 0;
       let stopped: Output | undefined;
       let stoppedHelp: string[] = [];
       for (const [index, user] of batch.entries()) {
-        if (index > 0) await pause(Math.round(intervalMs * (1 + FOLLOW_JITTER * Math.min(Math.max(random(), 0), 1))));
+        const wait = index > 0 ? jitteredWait() : leftOf(jitteredWait());
+        if (wait > 0) await pause(wait);
         try {
           const data = await sendFollow(account, user);
           if (data["pending_follow"] === true) requested += 1;
@@ -1459,7 +1466,11 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const done = followed + requested;
       const billable = done + (stopped?.["code"] === "OUTCOME_UNKNOWN" ? 1 : 0);
       const left = remaining.length - done;
-      const again = `Run \`x-axi follow-file ${file}\``;
+      const pacingFlags = (["--max", "--daily-cap", "--interval"] as const)
+        .filter((flag) => parsed.flags.has(flag))
+        .map((flag) => ` ${flag} ${{ "--max": max, "--daily-cap": dailyCap, "--interval": intervalMs / 1000 }[flag]}`)
+        .join("");
+      const again = `Run \`x-axi follow-file ${file}${pacingFlags}\``;
       const stillRecent = recentFollows(recent);
       let help: string[] = [];
       if (stopped) help = [...stoppedHelp, "Fix the reason above before running again; do not retry in a loop"];
