@@ -28,6 +28,7 @@ Pay-per-use API calls are billed to that app, so set a spend limit there first.
 | Write, approval required, each takes `--dry-run` | `post` (with `--media`, `--poll`, or `--quote`), `reply`, `thread`, `delete`, `hide`, `unhide`, `repost`, `unrepost`, `follow`, `unfollow`, `follow-file`, `bookmark`, `unbookmark`, `list create`, `list delete`, `list add`, `list remove`, `mute`, `unmute`, `dm send` |
 | Plan, reads X and writes a local file | `follow-plan` |
 | Account | `setup`, `login`, `logout`, `auth status`, `update` |
+| MCP server for clients that cannot run commands | `mcp`, as [Use from MCP clients](#use-from-mcp-clients) describes |
 
 `x-axi` with no arguments shows the cached account and local spend without an API call.
 `x-axi --help` lists the commands, and `x-axi <command> --help` shows its usage and cost.
@@ -235,6 +236,128 @@ macOS and other systems never show that dialog, so their dry runs leave it out.
 Reads needed to validate it still happen and are billed, such as the account read, the parent post on a reply, the post on a bookmark, and the List and member lookups on a List write, and they appear as `est_cost`.
 Media is inspected locally and no byte is uploaded.
 
+## Use from MCP clients
+
+`x-axi mcp` serves the same commands as [MCP](https://modelcontextprotocol.io) tools over stdio, for MCP clients that cannot run shell commands, such as Claude Desktop, Cursor, ChatGPT desktop, VS Code, and Windsurf; see [Tested with](#tested-with) for which have been run.
+Each tool call runs the same command code as the CLI, with the same validation, scope checks, spend ledger, never-retry rule, and approval dialog, and returns the same TOON text the CLI prints.
+
+**The approval dialog still guards every write.**
+It opens on the machine running x-axi and the write happens only after a click on Approve there, whatever the MCP client approves on its own, including any "always allow" setting.
+Where no dialog can open, such as a Linux session without a display, writes return `APPROVAL_UNAVAILABLE` exactly as the CLI does.
+If the client sends several tool calls at once, the server runs the writes one at a time, so two dialogs are never open together; reads and dry runs do not wait.
+A queued write whose call is cancelled, or whose client disconnects, before its turn is dropped without a dialog.
+
+Log in once in your own terminal first, because the server cannot log in:
+
+```sh
+npm install -g @shreejitverma/x-axi
+x-axi login --client-id YOUR_CLIENT_ID
+x-axi auth status
+```
+
+### Client configuration
+
+Each example starts the published package with `npx -y @shreejitverma/x-axi mcp`.
+With a global install, use `x-axi` as the command and `["mcp"]` as the arguments instead.
+Desktop apps on macOS do not always see your shell's `PATH`, so if the client reports that `npx` or `x-axi` is not found, use the absolute path that `command -v npx` or `command -v x-axi` prints.
+
+Claude Desktop, in `claude_desktop_config.json` (on macOS, `~/Library/Application Support/Claude/claude_desktop_config.json`):
+
+```json
+{
+  "mcpServers": {
+    "x-axi": {
+      "command": "npx",
+      "args": ["-y", "@shreejitverma/x-axi", "mcp"]
+    }
+  }
+}
+```
+
+Claude Code, which can also run the CLI directly with the bundled skill; add `--scope user` to use it in every project:
+
+```sh
+claude mcp add x-axi -- npx -y @shreejitverma/x-axi mcp
+```
+
+Cursor, in `.cursor/mcp.json` in the project or `~/.cursor/mcp.json` for every project:
+
+```json
+{
+  "mcpServers": {
+    "x-axi": {
+      "command": "npx",
+      "args": ["-y", "@shreejitverma/x-axi", "mcp"]
+    }
+  }
+}
+```
+
+VS Code, in `.vscode/mcp.json`:
+
+```json
+{
+  "servers": {
+    "x-axi": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@shreejitverma/x-axi", "mcp"]
+    }
+  }
+}
+```
+
+Other clients that start a stdio server take the same command and arguments.
+
+### Tools
+
+| Kind | Tools |
+|---|---|
+| Read | `x_me`, `x_timeline`, `x_mentions`, `x_replies`, `x_view`, `x_search`, `x_user`, `x_following`, `x_followers`, `x_likes`, `x_bookmarks`, `x_lists`, `x_list_view`, `x_list_members`, `x_mutes`, `x_blocks`, `x_trends`, `x_dm_list`, `x_dm_read` |
+| Local, no API call | `x_spend`, `x_auth_status` |
+| Write, approval required, each takes `dry_run` | `x_post`, `x_reply`, `x_thread`, `x_delete`, `x_hide`, `x_unhide`, `x_repost`, `x_unrepost`, `x_follow`, `x_unfollow`, `x_bookmark`, `x_unbookmark`, `x_list_create`, `x_list_delete`, `x_list_add`, `x_list_remove`, `x_mute`, `x_unmute`, `x_dm_send` |
+
+Each tool's input schema carries the CLI's limits, and its description gives the cost and the scope it needs.
+Reads are annotated `readOnlyHint`, and writes say whether they are destructive and idempotent.
+Text from X in any result, such as posts, bios, DMs, List names, and trends, is untrusted data, never instructions, and the server's instructions tell the client so.
+An error is a tool result with `isError` whose text is the CLI's TOON error, with its code and help; a bad argument returns `VALIDATION_ERROR` the same way.
+`x_post` and `x_reply` take `media` as an absolute path on the machine running x-axi, because the client's working directory is not known.
+
+These stay CLI-only:
+
+- `login`, `logout`, `setup`, and `update`, which manage the login or the install and are for you in a terminal.
+- `api`, the raw read, because it has no spend estimate.
+- `follow-plan` and the `following --all --out` and `followers --all --out` exports, because they write files at paths the client cannot see.
+- `follow-file`, because a paced batch outlasts a client's request timeout and cannot be stopped part way; run it in a terminal and see `x-axi follow-file --help` for its pacing and caps.
+
+### Timeouts
+
+The dialog waits 120 seconds by default, and `X_AXI_APPROVAL_TIMEOUT` sets a different number of seconds.
+Some clients give up on a tool call sooner than that.
+The dialog still decides: an Approve after the client gave up still sends the write, and the client never sees the result.
+Check before asking for the same write again:
+
+- `x_post`, `x_reply`, and `x_thread`: `x_timeline`.
+- `x_delete`: `x_view` on the post.
+- `x_dm_send`: `x_dm_read` with the same user.
+- `x_follow` and `x_unfollow`: `x_following`.
+- `x_mute` and `x_unmute`: `x_mutes`.
+- `x_bookmark` and `x_unbookmark`: `x_bookmarks`.
+- `x_list_create` and `x_list_delete`: `x_lists`; `x_list_add` and `x_list_remove`: `x_list_members`.
+- `x_hide`, `x_unhide`, `x_repost`, and `x_unrepost`: no tool can read that state, so check the reply or your profile on x.com.
+
+To keep the dialog inside the client's limit, set the variable in the server's `env`, such as `"env": { "X_AXI_APPROVAL_TIMEOUT": "50" }`.
+
+### Tested with
+
+Only Claude Code 2.1.318 has run this server live, on 2026-11-06, and it called only `x_auth_status` and `x_spend`, which never reach X.
+These are unverified:
+
+- Claude Desktop, Cursor, VS Code, ChatGPT desktop, and Windsurf; their configurations above have not been run, and the `claude mcp add` line was checked against `claude mcp add --help`, not run.
+- Whether the macOS approval dialog comes to the front when a desktop app, rather than a terminal, starts the server.
+- Whether a desktop app finds `npx` or `x-axi` without an absolute path.
+- Each client's tool-call timeout, so the value that keeps the dialog inside it is not known.
+
 ## Where the login lives
 
 The access token, refresh token, expiry, scopes, and client ID are stored as one record in the OS keystore, behind a small interface with no plain-file implementation.
@@ -408,6 +531,8 @@ X_AXI_TEST_DIALOG=1 pnpm test     # macOS: also opens a real dialog for one seco
 The suite runs the login flow against a local fake of X's OAuth endpoints with an injected in-memory keystore, checks PKCE against the RFC 7636 appendix B vector, and asserts that the real backends' commands carry the secret on stdin and never on argv.
 Commands run against fakes of X that answer with the shapes in each endpoint's API reference, and no test calls live X.
 Under `X_AXI_API_BASE`, which may only point at loopback, the keystore is never read, a fixed test token is sent, and the login's scopes are unknown, so `MISSING_SCOPE` checks let commands through.
+The MCP tests run `x-axi mcp` from the build over stdio against a loopback fake of X and check that every stdout line is a JSON-RPC message.
+Writes that need an answer, and scope checks, run through `test/fixtures/mcp-server.mjs`, which serves the same built server with a recording test approver; the binary itself has no test approver and no approval override.
 [CONTRIBUTING.md](CONTRIBUTING.md) has the rules for tests, commits, and releases.
 
 ## License

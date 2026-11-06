@@ -19,6 +19,7 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
 
 ## Rules
 
+- Where the CLI cannot run, the same commands are MCP tools named `x_<command>`, such as `x_mentions` and `x_post`, from `x-axi mcp`; every rule here applies to them, writes take `dry_run`, and an error is a result whose text holds the same code and help.
 - Every write opens a native approval dialog that only the user can answer: on macOS, or on a Linux desktop through `zenity` or `kdialog`.
   If it returns `NOT_APPROVED`, nothing was sent; report that and do not retry unless asked.
 - `APPROVAL_UNAVAILABLE` means this machine cannot show the dialog, as in headless, SSH, or CI sessions, and `APPROVAL_UNSUPPORTED_PLATFORM` means Windows or another unsupported system.
