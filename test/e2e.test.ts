@@ -109,6 +109,17 @@ it("reports the version in package.json", async () => {
   expect(out.trim()).toContain(PACKAGE.version);
 });
 
+// `npm link` and a git checkout run the built file itself, so it must be executable after a clean build,
+// which tsc alone does not make it. npm sets the bit on registry installs, so only this path needs it.
+it("runs the built binary directly through its shebang", async () => {
+  const out = await new Promise<string>((done, fail) => {
+    execFile(BIN, ["--version"], { env: { ...process.env, X_AXI_API_BASE: base, X_AXI_STATE_DIR: dir } }, (error, stdout) =>
+      error ? fail(error) : done(stdout),
+    );
+  });
+  expect(out.trim()).toContain(PACKAGE.version);
+});
+
 it("does not advertise a registry upgrade in help", async () => {
   const { out, code } = await run(["--help"]);
   expect(code).toBe(0);
