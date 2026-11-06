@@ -1466,9 +1466,9 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const done = followed + requested;
       const billable = done + (stopped?.["code"] === "OUTCOME_UNKNOWN" ? 1 : 0);
       const left = remaining.length - done;
-      const pacingFlags = (["--max", "--daily-cap", "--interval"] as const)
+      const pacingFlags = (["--daily-cap", "--interval"] as const)
         .filter((flag) => parsed.flags.has(flag))
-        .map((flag) => ` ${flag} ${{ "--max": max, "--daily-cap": dailyCap, "--interval": intervalMs / 1000 }[flag]}`)
+        .map((flag) => ` ${flag} ${{ "--daily-cap": dailyCap, "--interval": intervalMs / 1000 }[flag]}`)
         .join("");
       const again = `Run \`x-axi follow-file ${file}${pacingFlags}\``;
       const stillRecent = recentFollows(recent);

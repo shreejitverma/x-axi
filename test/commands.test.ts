@@ -864,7 +864,8 @@ describe("follow-file", () => {
     const file = queue(3);
     const h = run(followOk);
     const out = (await h.commands["follow-file"]!([file, "--max", "1", "--daily-cap", "50", "--interval", "90"])) as { help: string[] };
-    expect(out.help[0]).toContain(`\`x-axi follow-file ${file} --max 1 --daily-cap 50 --interval 90\` to continue; 49 follows left under the 50 per 24 hours cap`);
+    expect(out.help[0]).toContain(`\`x-axi follow-file ${file} --daily-cap 50 --interval 90\` to continue; 49 follows left under the 50 per 24 hours cap`);
+    expect(out.help[0]).not.toContain("--max");
   });
 
   it("repeats the pacing flags in the command to run once the cap reopens", async () => {

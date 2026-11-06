@@ -317,7 +317,7 @@ Checked on 2026-11-03 against the [changelog](https://docs.x.com/changelog), [pr
   So `follow-file` defaults to 50 follows per run, at most 100 in any 24 hours, and 60 seconds between follows, each wait stretched by up to half again at random.
   `--daily-cap` raises the 24-hour cap up to 400, and `--interval` sets the base wait from 20 seconds (at most 45 per 15 minutes) to 3600; raise them only knowingly.
   The first follow of a run waits out what is left of one such wait since the newest logged follow, so a quick rerun keeps the gap; the dry run shows the longest that wait can be as `pacing.first_wait_s`.
-  The continue hint repeats any `--max`, `--daily-cap`, and `--interval` you passed, so following it keeps your pace.
+  The continue hint repeats any `--daily-cap` and `--interval` you passed, so following it keeps your pace.
   It asks once per batch, and stops at the first error; a locked account stops with `ACCOUNT_LOCKED`, which only logging in at <https://x.com> and following X's unlock steps clears.
   After a lock, wait at least a day and resume more slowly, for example `--daily-cap 50 --interval 90`.
   Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.
