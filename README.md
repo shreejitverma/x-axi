@@ -238,7 +238,7 @@ Media is inspected locally and no byte is uploaded.
 
 ## Use from MCP clients
 
-`x-axi mcp` serves the same commands as [MCP](https://modelcontextprotocol.io) tools over stdio, for clients that cannot run shell commands, such as Claude Desktop, Cursor, ChatGPT desktop, VS Code, and Windsurf.
+`x-axi mcp` serves the same commands as [MCP](https://modelcontextprotocol.io) tools over stdio, for MCP clients that cannot run shell commands, such as Claude Desktop, Cursor, ChatGPT desktop, VS Code, and Windsurf; see [Tested with](#tested-with) for which have been run.
 Each tool call runs the same command code as the CLI, with the same validation, scope checks, spend ledger, never-retry rule, and approval dialog, and returns the same TOON text the CLI prints.
 
 **The approval dialog still guards every write.**
@@ -335,8 +335,28 @@ These stay CLI-only:
 The dialog waits 120 seconds by default, and `X_AXI_APPROVAL_TIMEOUT` sets a different number of seconds.
 Some clients give up on a tool call sooner than that.
 The dialog still decides: an Approve after the client gave up still sends the write, and the client never sees the result.
-Check with `x_timeline` or the check the tool names before asking for the same write again.
+Check before asking for the same write again:
+
+- `x_post`, `x_reply`, and `x_thread`: `x_timeline`.
+- `x_delete`: `x_view` on the post.
+- `x_dm_send`: `x_dm_read` with the same user.
+- `x_follow` and `x_unfollow`: `x_following`.
+- `x_mute` and `x_unmute`: `x_mutes`.
+- `x_bookmark` and `x_unbookmark`: `x_bookmarks`.
+- `x_list_create` and `x_list_delete`: `x_lists`; `x_list_add` and `x_list_remove`: `x_list_members`.
+- `x_hide`, `x_unhide`, `x_repost`, and `x_unrepost`: no tool can read that state, so check the reply or your profile on x.com.
+
 To keep the dialog inside the client's limit, set the variable in the server's `env`, such as `"env": { "X_AXI_APPROVAL_TIMEOUT": "50" }`.
+
+### Tested with
+
+Only Claude Code 2.1.318 has run this server live, on 2026-11-06, and it called only `x_auth_status` and `x_spend`, which never reach X.
+These are unverified:
+
+- Claude Desktop, Cursor, VS Code, ChatGPT desktop, and Windsurf; their configurations above have not been run, and the `claude mcp add` line was checked against `claude mcp add --help`, not run.
+- Whether the macOS approval dialog comes to the front when a desktop app, rather than a terminal, starts the server.
+- Whether a desktop app finds `npx` or `x-axi` without an absolute path.
+- Each client's tool-call timeout, so the value that keeps the dialog inside it is not known.
 
 ## Where the login lives
 
