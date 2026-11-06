@@ -122,6 +122,12 @@ export function toApiError(response: ApiResponse, context: { replyTo?: string; t
       [`Send it by hand in the browser instead: https://x.com/intent/post?${intent.toString()}`],
     );
   }
+  if (status === 403 && /account is (temporarily )?locked/i.test(detail)) {
+    return new AxiError(detail, "ACCOUNT_LOCKED", [
+      "Log in at https://x.com and complete the unlock steps X shows; x-axi cannot do this for you",
+      "After unlocking, wait at least a day before bulk actions, then go slower than before, for example `x-axi follow-file <file> --daily-cap 50 --interval 90`",
+    ]);
+  }
   if (status === 403) return new AxiError(detail, "FORBIDDEN");
   if (status === 404) return new AxiError(detail, "NOT_FOUND");
   return new AxiError(`X returned ${status}: ${detail}`, status >= 400 && status < 500 ? "VALIDATION_ERROR" : "X_UNAVAILABLE");

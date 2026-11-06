@@ -18,14 +18,24 @@ export interface Deps {
   sleep?: (ms: number) => Promise<void>;
   /** process.platform outside tests; decides whether a dry run warns about the Linux dialog. */
   platform?: NodeJS.Platform;
+  /** Math.random outside tests; spreads follow-file's waits so the pacing is not a fixed beat. */
+  random?: () => number;
 }
 
-// X allows 50 follows per 15 minutes and 400 per day. These stay under both.
-const FOLLOW_INTERVAL_MS = 20_000;
-const FOLLOW_DAILY_CAP = 400;
+// X documents 400 follows a day and 50 per 15 minutes, but those are ceilings, not a safe pace: on 2026-11-06
+// X locked an account that had followed 395 accounts over five days at one follow every 20 seconds.
+// So the defaults stay far below the documented limits and each wait is jittered; flags may raise them up to the limits.
+const FOLLOW_DAILY_MAX = 400;
+const FOLLOW_DAILY_DEFAULT = 100;
+const FOLLOW_INTERVAL_DEFAULT_S = 60;
+// At 20 seconds a 15-minute window holds at most 45 follows, under X's 50.
+const FOLLOW_INTERVAL_MIN_S = 20;
+const FOLLOW_INTERVAL_MAX_S = 3600;
+// Each wait is the interval times a factor from 1 up to 1.5, so jitter only ever slows the pace.
+const FOLLOW_JITTER = 0.5;
 // Sums of per-row rates carry float error, so 0.01 + 137 * 0.01 prints as 1.38 but compares above it.
 const CAP_SLACK_USD = 1e-9;
-const FOLLOW_BATCH_DEFAULT = 100;
+const FOLLOW_BATCH_DEFAULT = 50;
 
 // GET /2/users/{id}/following and /followers take max_results from 1 to 1000.
 const USER_PAGE_MAX = 1000;
@@ -223,7 +233,7 @@ export const HELP: Record<string, string> = {
   unrepost: "usage: x-axi unrepost <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. The cost is unknown, as for `repost`.",
   follow: "usage: x-axi follow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.015.",
   unfollow: "usage: x-axi unfollow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.01.",
-  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. One follow every 20 seconds, at most 400 in 24 hours, default 100 per run. Stops at the first error. Rerun to continue. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
+  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. Rerun to continue; the first follow of a run waits out what is left of one wait since the last follow. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
   bookmarks: "usage: x-axi bookmarks [--limit 1-100] [--next TOKEN] [--full]\nYour bookmarked posts. About $0.001 per post at the Owned Read rate when you own the app, plus $0.01 per author. Needs the bookmark.read scope.",
   bookmark: "usage: x-axi bookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then bookmarks it. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
   unbookmark: "usage: x-axi unbookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then removes the bookmark. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
@@ -1386,12 +1396,19 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       return { unfollow: { handle: `@${target.username}`, status: "not following" }, est_cost: money(RATES.interactionDelete) };
     },
     "follow-file": async (args) => {
-      const parsed = parseArgs(args, "follow-file", ["--max"], [DRY_RUN]);
+      const parsed = parseArgs(args, "follow-file", ["--max", "--daily-cap", "--interval"], [DRY_RUN]);
       const file = onePositional(parsed, "follow-file");
       if (!file) throw usage("expected a JSON file", [HELP["follow-file"] as string]);
-      const raw = parsed.flags.get("--max");
-      const max = raw === undefined ? FOLLOW_BATCH_DEFAULT : Number(raw);
-      if (!Number.isInteger(max) || max < 1 || max > FOLLOW_DAILY_CAP) throw usage(`--max must be an integer from 1 to ${FOLLOW_DAILY_CAP}`);
+      const intFlag = (flag: string, fallback: number, low: number, high: number): number => {
+        const raw = parsed.flags.get(flag);
+        const value = raw === undefined ? fallback : Number(raw);
+        if (!Number.isInteger(value) || value < low || value > high) throw usage(`${flag} must be an integer from ${low} to ${high}`);
+        return value;
+      };
+      const max = intFlag("--max", FOLLOW_BATCH_DEFAULT, 1, FOLLOW_DAILY_MAX);
+      const dailyCap = intFlag("--daily-cap", FOLLOW_DAILY_DEFAULT, 1, FOLLOW_DAILY_MAX);
+      const intervalMs = intFlag("--interval", FOLLOW_INTERVAL_DEFAULT_S, FOLLOW_INTERVAL_MIN_S, FOLLOW_INTERVAL_MAX_S) * 1000;
+      const random = deps.random ?? Math.random;
       const queue = parseFollowQueue(file);
       if (!queue.length) return { follow_file: { followed: 0, remaining: 0, status: "the file lists no accounts (no-op)" } };
       const account = await refreshAccount();
@@ -1399,26 +1416,35 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const remaining = queue.filter((u) => !log.following[u.id]);
       if (!remaining.length) return { follow_file: { followed: 0, remaining: 0, status: "every account in this file is already followed through x-axi (no-op)" } };
       const recent = recentFollows(log.events);
-      const room = FOLLOW_DAILY_CAP - recent.length;
+      const room = dailyCap - recent.length;
       if (room <= 0) {
-        throw new AxiError(`the ${FOLLOW_DAILY_CAP} follows per 24 hours limit is used up until ${capReopensAt(recent)}`, "DAILY_LIMIT");
+        throw new AxiError(`the ${dailyCap} follows per 24 hours cap is used up until ${capReopensAt(recent, dailyCap)}`, "DAILY_LIMIT");
       }
       const batch = remaining.slice(0, Math.min(max, room));
       const usd = batch.length * RATES.userInteraction;
       const names = batch.slice(0, 10).map((u) => `@${u.username}`).join(", ");
       const more = batch.length > 10 ? `, and ${batch.length - 10} more` : "";
       const provenance = `Usernames come from ${shortenPath(displayText(file))} and were not verified with X.`;
-      const action = `Follow ${counted(batch.length, "account")} over about ${counted(Math.ceil((batch.length * FOLLOW_INTERVAL_MS) / 60_000), "minute")}`;
+      const jitteredWait = (): number => Math.round(intervalMs * (1 + FOLLOW_JITTER * Math.min(Math.max(random(), 0), 1)));
+      // The first follow of a run waits out what is left of a wait since the newest follow, so reruns keep the gap too.
+      const lastAt = recent[recent.length - 1];
+      const leftOf = (waitMs: number): number => (lastAt === undefined ? 0 : Math.max(0, Math.min(waitMs, waitMs - (Date.now() - lastAt))));
+      const meanWait = intervalMs * (1 + FOLLOW_JITTER / 2);
+      const firstWaitS = Math.ceil(leftOf(intervalMs * (1 + FOLLOW_JITTER)) / 1000);
+      const minutes = Math.max(1, Math.ceil((leftOf(meanWait) + (batch.length - 1) * meanWait) / 60_000));
+      const action = `Follow ${counted(batch.length, "account")} over about ${counted(minutes, "minute")}`;
       if (parsed.flags.has(DRY_RUN)) {
-        return dryRunOutput(action, account, [{ method: "POST", path: `/2/users/${account.id}/following`, body: "one request per account in batch, as {target_user_id}" }], usd, recorded, { batch, remaining_after: remaining.length - batch.length, provenance });
+        return dryRunOutput(action, account, [{ method: "POST", path: `/2/users/${account.id}/following`, body: "one request per account in batch, as {target_user_id}" }], usd, recorded, { batch, remaining_after: remaining.length - batch.length, pacing: { interval_s: intervalMs / 1000, jitter: `up to +${FOLLOW_JITTER * 100}%`, first_wait_s: firstWaitS, daily_cap: dailyCap, room_now: room }, provenance });
       }
-      await gate(action, account, { content: `${names}${more}\n\n${provenance}` }, usd);
+      const firstWaitNote = firstWaitS > 0 ? `\n\nThe first follow waits up to ${counted(firstWaitS, "second")} after your last one.` : "";
+      await gate(action, account, { content: `${names}${more}\n\n${provenance}${firstWaitNote}` }, usd);
       let followed = 0;
       let requested = 0;
       let stopped: Output | undefined;
       let stoppedHelp: string[] = [];
       for (const [index, user] of batch.entries()) {
-        if (index > 0) await pause(FOLLOW_INTERVAL_MS);
+        const wait = index > 0 ? jitteredWait() : leftOf(jitteredWait());
+        if (wait > 0) await pause(wait);
         try {
           const data = await sendFollow(account, user);
           if (data["pending_follow"] === true) requested += 1;
@@ -1440,12 +1466,16 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const done = followed + requested;
       const billable = done + (stopped?.["code"] === "OUTCOME_UNKNOWN" ? 1 : 0);
       const left = remaining.length - done;
-      const again = `Run \`x-axi follow-file ${file}\``;
+      const pacingFlags = (["--daily-cap", "--interval"] as const)
+        .filter((flag) => parsed.flags.has(flag))
+        .map((flag) => ` ${flag} ${{ "--daily-cap": dailyCap, "--interval": intervalMs / 1000 }[flag]}`)
+        .join("");
+      const again = `Run \`x-axi follow-file ${file}${pacingFlags}\``;
       const stillRecent = recentFollows(recent);
       let help: string[] = [];
       if (stopped) help = [...stoppedHelp, "Fix the reason above before running again; do not retry in a loop"];
-      else if (left > 0 && stillRecent.length < FOLLOW_DAILY_CAP) help = [`${again} to continue; ${counted(FOLLOW_DAILY_CAP - stillRecent.length, "follow")} left in the rolling 24 hours`];
-      else if (left > 0) help = [`${again} after ${capReopensAt(stillRecent)} to continue`];
+      else if (left > 0 && stillRecent.length < dailyCap) help = [`${again} to continue; ${counted(dailyCap - stillRecent.length, "follow")} left under the ${dailyCap} per 24 hours cap`];
+      else if (left > 0) help = [`${again} after ${capReopensAt(stillRecent, dailyCap)} to continue`];
       return {
         follow_file: { followed, requested, remaining: left, status: stopped ? "stopped early" : "batch complete" },
         ...(stopped ? { stopped } : {}),
@@ -1604,8 +1634,8 @@ function recentFollows(events: (string | number)[]): number[] {
 }
 
 /** The cap reopens when enough of the oldest follows age out to leave the count under it. */
-function capReopensAt(recent: number[]): string {
-  return new Date((recent[recent.length - FOLLOW_DAILY_CAP] as number) + DAY_MS).toISOString();
+function capReopensAt(recent: number[], cap: number): string {
+  return new Date((recent[recent.length - cap] as number) + DAY_MS).toISOString();
 }
 
 function parseFollowQueue(file: string): { id: string; username: string }[] {

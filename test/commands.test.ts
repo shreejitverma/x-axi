@@ -784,10 +784,10 @@ describe("follow-file", () => {
     return file;
   };
   const followOk = () => ok({ data: { following: true, pending_follow: false } });
-  const withSleep = (h: ReturnType<typeof harness>, client: XClient, sleeps: number[]) =>
-    buildCommands({ client, approve: h.approve, auth: h.auth, sleep: async (ms) => { sleeps.push(ms); } });
+  const withSleep = (h: ReturnType<typeof harness>, client: XClient, sleeps: number[], random: () => number) =>
+    buildCommands({ client, approve: h.approve, auth: h.auth, random, sleep: async (ms) => { sleeps.push(ms); } });
 
-  function run(handler: Parameters<typeof harness>[0], approval: ApprovalResult = "approved") {
+  function run(handler: Parameters<typeof harness>[0], approval: ApprovalResult = "approved", random: () => number = () => 0) {
     const h = harness(handler, approval);
     const sleeps: number[] = [];
     const client: XClient = { request: async (method, path, body) => {
@@ -795,7 +795,7 @@ describe("follow-file", () => {
       h.calls.push(call);
       return path === "/2/users/me" ? ME : handler(call);
     } };
-    return { ...h, sleeps, commands: withSleep(h, client, sleeps) };
+    return { ...h, sleeps, commands: withSleep(h, client, sleeps, random) };
   }
 
   it("asks once, paces requests, and resumes without repeating anyone", async () => {
@@ -803,11 +803,127 @@ describe("follow-file", () => {
     const h = run(followOk);
     await expect(h.commands["follow-file"]!([file, "--max", "2"])).resolves.toMatchObject({ follow_file: { followed: 2, remaining: 1 } });
     expect(h.approve).toHaveBeenCalledTimes(1);
-    expect(h.sleeps).toEqual([20_000]);
+    // Default pacing is 60 seconds; with the jitter source at 0 the wait is exactly that.
+    expect(h.sleeps).toEqual([60_000]);
     await h.commands["follow-file"]!([file]);
     expect(h.writes().map((c) => c.body?.["target_user_id"])).toEqual(["100", "101", "102"]);
     await expect(h.commands["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { remaining: 0 } });
     expect(h.approve).toHaveBeenCalledTimes(2);
+  });
+
+  // X locked a real account on 2026-11-06 at one follow every 20 seconds, so the defaults are slower and jittered.
+  it.each([
+    [[] as string[], 0, 60_000],
+    [[] as string[], 1, 90_000],
+    [[] as string[], 0.5, 75_000],
+    [["--interval", "20"], 0, 20_000],
+    [["--interval", "3600"], 1, 5_400_000],
+  ])("waits interval x (1 + jitter up to 50%%) between follows (%j, random %s)", async (flags, r, wait) => {
+    const h = run(followOk, "approved", () => r);
+    await h.commands["follow-file"]!([queue(3), ...flags]);
+    expect(h.sleeps).toEqual([wait, wait]);
+  });
+
+  it("follows at most 50 per run by default", async () => {
+    const h = run(followOk);
+    await expect(h.commands["follow-file"]!([queue(60)])).resolves.toMatchObject({ follow_file: { followed: 50, remaining: 10 } });
+  });
+
+  it("caps itself at 100 follows in 24 hours by default, and at most 400 when raised", async () => {
+    const now = new Date().toISOString();
+    writeFileSync(join(dir, "follows.json"), JSON.stringify(Object.fromEntries(Array.from({ length: 100 }, (_, i) => [String(9000 + i), now]))));
+    const h = run(followOk);
+    await expect(h.commands["follow-file"]!([queue(1)])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
+    expect(h.approve).not.toHaveBeenCalled();
+    await expect(h.commands["follow-file"]!([queue(1), "--daily-cap", "400"])).resolves.toMatchObject({ follow_file: { followed: 1 } });
+  });
+
+  it.each([
+    ["--interval", "19"],
+    ["--interval", "3601"],
+    ["--interval", "1.5"],
+    ["--daily-cap", "0"],
+    ["--daily-cap", "401"],
+  ])("refuses %s %s before any call", async (flag, value) => {
+    const h = run(followOk);
+    await expect(h.commands["follow-file"]!([queue(1), flag, value])).rejects.toMatchObject({ code: "VALIDATION_ERROR" });
+    expect(h.calls).toEqual([]);
+  });
+
+  it("shows the pacing it will use in a dry run", async () => {
+    const h = run(followOk);
+    await expect(h.commands["follow-file"]!([queue(2), "--interval", "90", "--daily-cap", "50", "--dry-run"])).resolves.toMatchObject({
+      dry_run: { pacing: { interval_s: 90, jitter: "up to +50%", first_wait_s: 0, daily_cap: 50, room_now: 50 } },
+    });
+    expect(h.writes()).toEqual([]);
+  });
+
+  const seedFollowAt = (atMs: number) => writeFileSync(join(dir, "follows.json"), JSON.stringify({ "9000": new Date(atMs).toISOString() }));
+
+  it("repeats the pacing flags the user chose in the command to continue", async () => {
+    const file = queue(3);
+    const h = run(followOk);
+    const out = (await h.commands["follow-file"]!([file, "--max", "1", "--daily-cap", "50", "--interval", "90"])) as { help: string[] };
+    expect(out.help[0]).toContain(`\`x-axi follow-file ${file} --daily-cap 50 --interval 90\` to continue; 49 follows left under the 50 per 24 hours cap`);
+    expect(out.help[0]).not.toContain("--max");
+  });
+
+  it("repeats the pacing flags in the command to run once the cap reopens", async () => {
+    const file = queue(3);
+    const h = run(followOk);
+    const out = (await h.commands["follow-file"]!([file, "--daily-cap", "1", "--interval", "90"])) as { help: string[] };
+    expect(out.help[0]!.startsWith(`Run \`x-axi follow-file ${file} --daily-cap 1 --interval 90\` after `)).toBe(true);
+    expect(out.help[0]!.endsWith(" to continue")).toBe(true);
+  });
+
+  it("adds no flags to the command to continue when none were given", async () => {
+    const file = queue(60);
+    const h = run(followOk);
+    const out = (await h.commands["follow-file"]!([file])) as { help: string[] };
+    expect(out.help[0]).toContain(`\`x-axi follow-file ${file}\` to continue`);
+  });
+
+  // A rerun right after a follow must still keep the 60 second base gap: 60 - 10 seconds already passed = 50.
+  it.each([
+    [0, 50_000],
+    [1, 80_000],
+  ])("waits out the rest of the gap before the first follow of a rerun (random %s)", async (r, rest) => {
+    seedFollowAt(Date.now() - 10_000);
+    const h = run(followOk, "approved", () => r);
+    await h.commands["follow-file"]!([queue(2)]);
+    expect(h.sleeps).toHaveLength(2);
+    expect(h.sleeps[0]).toBeGreaterThan(rest - 1000);
+    expect(h.sleeps[0]).toBeLessThanOrEqual(rest);
+    expect(h.sleeps[1]).toBe(60_000 * (1 + r / 2));
+  });
+
+  it("does not wait before the first follow when the last one was long ago", async () => {
+    seedFollowAt(Date.now() - 2 * 3600 * 1000);
+    const h = run(followOk);
+    await h.commands["follow-file"]!([queue(2)]);
+    expect(h.sleeps).toEqual([60_000]);
+  });
+
+  it("shows the longest first wait in the dry run and the dialog, and counts it in the estimate", async () => {
+    // 10 seconds after a follow, at most 90 - 10 = 80 seconds remain; on average 75 - 10 = 65, so about 2 minutes.
+    seedFollowAt(Date.now() - 10_000);
+    const h = run(followOk);
+    await expect(h.commands["follow-file"]!([queue(1), "--dry-run"])).resolves.toMatchObject({ dry_run: { pacing: { first_wait_s: 80 } } });
+    await h.commands["follow-file"]!([queue(1)]);
+    const shown = formatApproval(h.requests[0]!);
+    expect(shown).toContain("Follow 1 account over about 2 minutes");
+    expect(shown).toContain("The first follow waits up to 80 seconds after your last one.");
+  });
+
+  it("stops with ACCOUNT_LOCKED and the unlock step when X locks the account", async () => {
+    // The 403 detail X returned on the owner's account on 2026-11-06.
+    const detail = "Your account is temporarily locked. Please log in to https://x.com to unlock your account.";
+    let n = 0;
+    const h = run(() => (++n === 2 ? ok({ detail }, 403) : followOk()));
+    const out = (await h.commands["follow-file"]!([queue(3)])) as { stopped: Json; help: string[] };
+    expect(out).toMatchObject({ follow_file: { followed: 1, remaining: 2, status: "stopped early" }, stopped: { at: "@user1", code: "ACCOUNT_LOCKED" } });
+    expect(out.help.join(" ")).toContain("https://x.com");
+    expect(h.writes()).toHaveLength(2);
   });
 
   it("sends nothing when the batch is not approved", async () => {
@@ -837,7 +953,7 @@ describe("follow-file", () => {
     const used = Object.fromEntries(Array.from({ length: 400 }, (_, i) => [String(9000 + i), now]));
     writeFileSync(join(dir, "follows.json"), JSON.stringify(used));
     const h = run(followOk);
-    await expect(h.commands["follow-file"]!([queue(1)])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
+    await expect(h.commands["follow-file"]!([queue(1), "--daily-cap", "400"])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
     expect(h.approve).not.toHaveBeenCalled();
   });
 
@@ -931,8 +1047,8 @@ describe("follow log", () => {
 
   it.each([
     [1, "Follow 1 account over about 1 minute as"],
-    [3, "Follow 3 accounts over about 1 minute as"],
-    [6, "Follow 6 accounts over about 2 minutes as"],
+    [3, "Follow 3 accounts over about 3 minutes as"],
+    [6, "Follow 6 accounts over about 7 minutes as"],
   ])("names a batch of %i correctly in the dialog", async (count, wording) => {
     const h = harness(social);
     await withoutSleep(h, social)["follow-file"]!([queueFile(Array.from({ length: count }, (_, i) => String(100 + i)))]);
@@ -942,7 +1058,7 @@ describe("follow log", () => {
   it("says one follow is left when one is", async () => {
     seedRecent(398);
     const h = harness(social);
-    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1"])) as { help: string[] };
+    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1", "--daily-cap", "400"])) as { help: string[] };
     expect(out.help[0]).toContain("1 follow left");
   });
 
@@ -973,13 +1089,13 @@ describe("follow log", () => {
     expect(record.following["9000"]).toBeUndefined();
     expect(record.events).toHaveLength(400);
     const next = harness(social);
-    await expect(next.commands["follow-file"]!([queueFile(["9000"])])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
+    await expect(next.commands["follow-file"]!([queueFile(["9000"]), "--daily-cap", "400"])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
     const aged = new Date(Date.now() - 25 * 3600 * 1000).toISOString();
     const file = logFile();
     file.accounts["1"]!.events = file.accounts["1"]!.events.map(() => aged);
     writeFileSync(logPath(), JSON.stringify({ version: 2, ...file }));
     const later = harness(social);
-    await expect(withoutSleep(later, social)["follow-file"]!([queueFile(["9000"])])).resolves.toMatchObject({ follow_file: { followed: 1, remaining: 0 } });
+    await expect(withoutSleep(later, social)["follow-file"]!([queueFile(["9000"]), "--daily-cap", "400"])).resolves.toMatchObject({ follow_file: { followed: 1, remaining: 0 } });
     expect(later.writes().map((c) => c.body?.["target_user_id"])).toEqual(["9000"]);
   });
 
@@ -997,7 +1113,7 @@ describe("follow log", () => {
     writeFileSync(logPath(), JSON.stringify({ version: 2, accounts: { "1": { following: {}, events } } }));
     const h = harness(social);
     const reopens = new Date(base + 1000 + 24 * 3600 * 1000).toISOString();
-    await expect(h.commands["follow-file"]!([queueFile(["100"])])).rejects.toThrow(reopens);
+    await expect(h.commands["follow-file"]!([queueFile(["100"]), "--daily-cap", "400"])).rejects.toThrow(reopens);
   });
 
   it.each([
@@ -1067,15 +1183,15 @@ describe("follow log", () => {
     const respond = (c: Call) => (c.method === "GET" ? ALICE : unknown());
     const h = harness(respond);
     const file = queueFile(["100"]);
-    await expect(withoutSleep(h, respond)["follow-file"]!([file])).resolves.toMatchObject({ stopped: { code: "OUTCOME_UNKNOWN" } });
+    await expect(withoutSleep(h, respond)["follow-file"]!([file, "--daily-cap", "400"])).resolves.toMatchObject({ stopped: { code: "OUTCOME_UNKNOWN" } });
     const record = logFile().accounts["1"]!;
     expect(record.events).toHaveLength(399);
     expect(record.following["100"]).toBeUndefined();
     const next = harness(social);
-    await expect(withoutSleep(next, social)["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { followed: 1, remaining: 0 } });
+    await expect(withoutSleep(next, social)["follow-file"]!([file, "--daily-cap", "400"])).resolves.toMatchObject({ follow_file: { followed: 1, remaining: 0 } });
     expect(next.writes().map((c) => c.body?.["target_user_id"])).toEqual(["100"]);
     expect(logFile().accounts["1"]!.events).toHaveLength(400);
-    await expect(next.commands["follow-file"]!([queueFile(["101"])])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
+    await expect(next.commands["follow-file"]!([queueFile(["101"]), "--daily-cap", "400"])).rejects.toMatchObject({ code: "DAILY_LIMIT" });
   });
 
   it.each(unknownFollows)("follow counts against the cap after %s, without marking the account followed", async (_name, unknown) => {
@@ -1114,7 +1230,7 @@ describe("follow log", () => {
   it("carries the outcome check into a stopped batch", async () => {
     const respond = (c: Call) => (c.method === "GET" ? ALICE : ok({}, 503));
     const h = harness(respond);
-    const out = (await withoutSleep(h, respond)["follow-file"]!([queueFile(["100"])])) as { help: string[] };
+    const out = (await withoutSleep(h, respond)["follow-file"]!([queueFile(["100"]), "--daily-cap", "400"])) as { help: string[] };
     expect(out.help[0]).toContain("https://x.com/user100");
   });
 
@@ -1127,7 +1243,7 @@ describe("follow log", () => {
 
   it("offers to continue now while the cap has room", async () => {
     const h = harness(social);
-    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1"])) as { help: string[] };
+    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--max", "1", "--daily-cap", "400"])) as { help: string[] };
     expect(out.help[0]).toContain("399 follows left");
     expect(out.help[0]).not.toContain("tomorrow");
   });
@@ -1136,7 +1252,7 @@ describe("follow log", () => {
     const start = Date.now();
     seedRecent(399, start);
     const h = harness(social);
-    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"])])) as { follow_file: Json; help: string[] };
+    const out = (await withoutSleep(h, social)["follow-file"]!([queueFile(["100", "101"]), "--daily-cap", "400"])) as { follow_file: Json; help: string[] };
     expect(out.follow_file).toMatchObject({ followed: 1, remaining: 1 });
     expect(out.help[0]).toContain(`after ${new Date(start + 24 * 3600 * 1000).toISOString()}`);
   });
