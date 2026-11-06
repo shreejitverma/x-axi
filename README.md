@@ -300,13 +300,15 @@ Checked on 2026-11-03 against the [changelog](https://docs.x.com/changelog), [pr
 - The April 16, 2026 changelog entry says following, likes, and quote-posts were removed from all self-serve tiers.
   A live follow on a Pay-per-use app still succeeded on 2026-10-31, so following may stop working without notice.
 - x-axi has no `like` or `unlike`, because of that entry.
-  Reading liked posts with `likes` is still documented and priced (Like: Read, and Owned Reads for your own), so it stays, though X may refuse it on self-serve.
+  Reading liked posts with `likes` is still documented and priced (Like: Read, and Owned Reads for your own), so it stays.
+  Reading your own liked posts worked live on a Pay-per-use app on 2026-11-06, while `like` and `unlike` writes remain unavailable on self-serve.
 - `post --quote` exists, but the create post reference says `quote_tweet_id` requires an Enterprise plan, so expect `FORBIDDEN` on self-serve; it is untested live.
 - `repost` and `unrepost` use documented endpoints that the removal entry does not name, and the [API overview](https://docs.x.com/x-api/overview) says its endpoints are on pay-per-use, though it also lists likes.
   No page names reposts on pay-per-use specifically and the pricing page has no line for them, so they are untested and unpriced.
 - x-axi has no `block` or `unblock`.
   The [Blocks introduction](https://docs.x.com/x-api/users/blocks/introduction) lists `GET /2/users/:id/blocking` as Pay-per-use and Enterprise, and `POST /2/users/:id/blocking` and `DELETE /2/users/:source_user_id/blocking/:target_user_id` as Enterprise only; the [Block User reference](https://docs.x.com/x-api/users/block-user) says the same in the [API index](https://docs.x.com/x-api/llms.txt).
 - The [Personalized Trends introduction](https://docs.x.com/x-api/trends/personalized-trends/introduction) lists a Premium user subscription as a requirement, so `trends` without `--woeid` may return `FORBIDDEN` on an account without X Premium.
+  It worked live on one Pay-per-use account on 2026-11-06, whose Premium status is unknown.
 - The [Trends by WOEID reference](https://docs.x.com/x-api/trends/get-trends-by-woeid) lists OAuth 2.0 user context and an app Bearer Token, while its [introduction](https://docs.x.com/x-api/trends/trends-by-woeid/introduction) shows only the app token; x-axi sends the user token, which is untested live.
 - Bookmarks, liked posts, Lists, mutes, blocks, trends, `post --poll`, and the quote, bookmark, and impression counts in `view` were added on 2026-11-03 from their API references.
   Their reads, including the `view` counts, succeeded against live X on 2026-11-06; their writes and `post --poll` have not been run against live X.

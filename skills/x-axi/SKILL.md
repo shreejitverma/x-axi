@@ -57,7 +57,7 @@ The login lives in the OS keystore (macOS Keychain or Linux Secret Service); nev
 
 X's changelog says likes, following, and quote-posts were removed from self-serve tiers, though following worked in a live test on 2026-10-31.
 x-axi has no `like` for that reason, and `post --quote` will probably return `FORBIDDEN` on self-serve.
-`likes` still reads liked posts, which X documents and prices, but X may refuse it.
+`likes` still reads liked posts, which X documents and prices, and it worked live on a Pay-per-use app on 2026-11-06.
 X offers block and unblock only on Enterprise, so x-axi reads `blocks` but cannot block; offer `mute` instead.
 X's docs say personalized `trends` need X Premium on the account, so `FORBIDDEN` there means the account lacks it.
 `repost` and `unrepost` are untested and unpriced in X's docs.
