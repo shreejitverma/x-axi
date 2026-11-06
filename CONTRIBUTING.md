@@ -45,7 +45,7 @@ Rules for tests:
 2. Add any new scope to `SCOPES` in `src/oauth.ts` and to the README, and check it with `requireScopes` before the first call.
 3. Add its rate to `src/rates.ts` from the pricing page, or record it as unpriced with `null`.
 4. Add usage and cost to `HELP` in `src/commands.ts`, the command to `TOP_HELP` in `src/cli.ts`, the README command table, and `skills/x-axi/SKILL.md`.
-5. Keep list items to 3 or 4 fields, state an empty result definitively, and end with a help hint where a next step exists.
+5. Keep list items to 3 or 4 fields, state an empty result definitively, and end every read, empty or not, with a help hint naming a next step; the shared empty-state test in `test/one-stop.test.ts` fails on `help: []`.
 
 ## Commits
 
