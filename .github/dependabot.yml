@@ -10,7 +10,17 @@ updates:
     # rerun `pnpm install` locally, which resolves within the policy, and commit that lockfile.
     cooldown:
       default-days: 7
+    # One PR per run for every npm update, so concurrent PRs never edit pnpm-lock.yaml on top of each other.
+    # On 2026-11-03 seven separate update PRs merged within minutes and left a lockfile with a duplicated key.
+    groups:
+      npm:
+        patterns: ["*"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      github-actions:
+        patterns: ["*"]

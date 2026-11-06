@@ -909,7 +909,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     await requireScopes(scopes, `\`${name}\``);
     const account = await me();
     const out = await userPageOf(`/2/users/${account.id}/${endpoint}?${pagedQuery(limit, parsed.flags.get("--next"))}`, rate, name, `0 accounts ${name === "mutes" ? "muted" : "blocked"}`);
-    return { account: `@${account.username}`, ...out, help: nextHelp(`x-axi ${name} --limit ${limit}`, out["next_token"]) };
+    const action = name === "mutes"
+      ? "Run `x-axi mute <handle>` to mute an account, or `x-axi unmute <handle>`, after approval"
+      : "Blocking through the API needs an Enterprise plan, so block or unblock at https://x.com";
+    return { account: `@${account.username}`, ...out, help: [...nextHelp(`x-axi ${name} --limit ${limit}`, out["next_token"]), action] };
   };
 
   /** The List a write names in its dialog, or undefined when X says it does not exist. Billed as a List read. */
@@ -980,7 +983,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const out = sub === "view"
         ? await postPage(`/2/lists/${id}/tweets?${q}&${POST_FIELDS}`, RATES.postRead, "list_view", "0 posts in this List", parsed.flags.has("--full"))
         : await userPageOf(`/2/lists/${id}/members?${q}`, RATES.userRead, "list_members", "0 members in this List");
-      return { list: id, ...out, help: nextHelp(`x-axi ${command} ${id} --limit ${limit}`, out["next_token"]) };
+      const action = sub === "view"
+        ? `Run \`x-axi list members ${id}\` for who is in it`
+        : `Run \`x-axi list add ${id} <handle>\` or \`x-axi list remove ${id} <handle>\`, after approval`;
+      return { list: id, ...out, help: [...nextHelp(`x-axi ${command} ${id} --limit ${limit}`, out["next_token"]), action] };
     }
     if (sub === "create") {
       const parsed = parseArgs(rest, command, ["--description"], ["--private", DRY_RUN]);
@@ -1303,7 +1309,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const target = await whose(handle);
       const q = pagedQuery(limit, parsed.flags.get("--next"));
       const out = await postPage(`/2/users/${target.id}/liked_tweets?${q}&${POST_FIELDS}`, target.own ? RATES.ownedRead : RATES.likeRead, "likes", `0 liked posts found for @${target.username}`, parsed.flags.has("--full"));
-      return { target: `@${target.username}`, ...out, help: nextHelp(`x-axi likes${handle ? ` ${handle}` : ""} --limit ${limit}`, out["next_token"]) };
+      return { target: `@${target.username}`, ...out, help: [...nextHelp(`x-axi likes${handle ? ` ${handle}` : ""} --limit ${limit}`, out["next_token"]), "Run `x-axi view <post>` for one post's metrics"] };
     },
     lists: async (args) => {
       const parsed = parseArgs(args, "lists", flagsForList);

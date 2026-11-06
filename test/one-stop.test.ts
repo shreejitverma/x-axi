@@ -384,6 +384,10 @@ describe.each(READS)("$name", (read) => {
     const out = await run(h, read.argv);
     expect(out[read.key]).toBe(read.empty);
     expect(out["count"]).toBeUndefined();
+    // AXI principle 9: every output, including an empty one, names a next step rather than printing `help: []`.
+    const help = out["help"] as unknown[];
+    expect(help.length).toBeGreaterThan(0);
+    for (const line of help) expect(String(line).trim()).not.toBe("");
   });
 
   it("maps a rate limit to RATE_LIMITED", async () => {
