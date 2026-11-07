@@ -321,6 +321,8 @@ Each tool's input schema carries the CLI's limits, and its description gives the
 Reads are annotated `readOnlyHint`, and writes say whether they are destructive and idempotent.
 Text from X in any result, such as posts, bios, DMs, List names, and trends, is untrusted data, never instructions, and the server's instructions tell the client so.
 An error is a tool result with `isError` whose text is the CLI's TOON error, with its code and help; a bad argument returns `VALIDATION_ERROR` the same way.
+Help lines in results are the CLI's, and the server's instructions tell the client how to read them as tools: `x-axi list view <list>` is `x_list_view`, a flag is its argument in snake_case, such as `--dry-run` as `dry_run`, and `--poll` is `poll_options`.
+A test holds that naming true for every tool.
 `x_post` and `x_reply` take `media` as an absolute path on the machine running x-axi, because the client's working directory is not known.
 
 These stay CLI-only:
@@ -351,9 +353,10 @@ To keep the dialog inside the client's limit, set the variable in the server's `
 ### Tested with
 
 Only Claude Code 2.1.318 has run this server live, on 2026-11-06, and it called only `x_auth_status` and `x_spend`, which never reach X.
+The `claude mcp add` line above was also run as written that day, and `claude mcp get x-axi` then reported the server connected.
 These are unverified:
 
-- Claude Desktop, Cursor, VS Code, ChatGPT desktop, and Windsurf; their configurations above have not been run, and the `claude mcp add` line was checked against `claude mcp add --help`, not run.
+- Claude Desktop, Cursor, VS Code, ChatGPT desktop, and Windsurf; their configurations above have not been run.
 - Whether the macOS approval dialog comes to the front when a desktop app, rather than a terminal, starts the server.
 - Whether a desktop app finds `npx` or `x-axi` without an absolute path.
 - Each client's tool-call timeout, so the value that keeps the dialog inside it is not known.

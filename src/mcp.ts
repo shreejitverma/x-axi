@@ -22,6 +22,8 @@ const INSTRUCTIONS = [
   "Every write tool opens a native approval dialog on the user's desktop and writes only if the user clicks Approve there, whatever this client approves on its own.",
   "Pass dry_run: true on a write to see the exact requests and the cost with no dialog and no write.",
   "Results are TOON text. A failure is a result with isError whose text holds an error, a code, and help; follow the help.",
+  "Help lines are written for the x-axi CLI. A command is the tool named x_ and its words joined by underscores, so `x-axi list view <list>` is x_list_view with the argument list; a flag is its argument in snake_case, so --max-spend is max_spend, --dry-run is dry_run, and --poll is poll_options.",
+  "A command or flag with no matching tool or argument, such as x-axi login, follow-plan, follow-file, or --all, is for the user to run in their own terminal.",
   "NOT_APPROVED means the user declined or did not answer and nothing was sent: do not retry unless the user asks.",
   "OUTCOME_UNKNOWN means the write may have gone through: do the check its help names before any second attempt.",
   "AUTH_REQUIRED and MISSING_SCOPE mean the user must run `x-axi login` in their own terminal; this server cannot log in.",

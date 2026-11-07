@@ -1,6 +1,6 @@
 {
   "name": "@shreejitverma/x-axi",
-  "version": "0.6.0",
+  "version": "0.6.1",
   "description": "AXI-compliant CLI for X: read data and manage your account, with a human approval gate on every write",
   "keywords": [
     "x",
