@@ -7,7 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { ApiResponse, Json, Method, XClient } from "../src/api.js";
 import type { ApprovalRequest, ApprovalResult } from "../src/approve.js";
 import type { AuthService } from "../src/auth.js";
-import { createMcpServer } from "../src/mcp.js";
+import { createMcpServer, TOOLS } from "../src/mcp.js";
 import { SCOPES } from "../src/oauth.js";
 import { decoded, MemorySession, textOf } from "./mcp-rpc.js";
 
@@ -134,29 +134,31 @@ async function session(options: Parameters<typeof harness>[0] = {}) {
   return { ...h, s };
 }
 
+const READ_CASES: [string, Record<string, unknown>, string][] = [
+  ["x_me", {}, "/2/users/me"],
+  ["x_timeline", { limit: 5, next: "tok", full: true }, "/2/users/1/tweets?max_results=5&pagination_token=tok"],
+  ["x_mentions", { limit: 7 }, "/2/users/1/mentions?max_results=7"],
+  ["x_replies", { post: "https://x.com/alice/status/50", limit: 10 }, `/2/tweets/search/recent?query=${encodeURIComponent("conversation_id:50")}&max_results=10`],
+  ["x_view", { post: "50" }, "/2/tweets/50?"],
+  ["x_search", { query: "from:alice -is:retweet", limit: 12 }, `/2/tweets/search/recent?query=${encodeURIComponent("from:alice -is:retweet")}&max_results=12`],
+  ["x_user", { handle: "@alice" }, "/2/users/by/username/alice?"],
+  ["x_following", { limit: 1 }, "/2/users/1/following?max_results=1"],
+  ["x_followers", { handle: "alice", limit: 2 }, "/2/users/9/followers?max_results=2"],
+  ["x_likes", { handle: "alice", limit: 5 }, "/2/users/9/liked_tweets?max_results=5"],
+  ["x_bookmarks", { limit: 3 }, "/2/users/1/bookmarks?max_results=3"],
+  ["x_lists", { limit: 4 }, "/2/users/1/owned_lists?max_results=4"],
+  ["x_list_view", { list: "https://x.com/i/lists/77", limit: 6 }, "/2/lists/77/tweets?max_results=6"],
+  ["x_list_members", { list: "77", next: "abc" }, "/2/lists/77/members?max_results=20&pagination_token=abc"],
+  ["x_mutes", { limit: 1000 }, "/2/users/1/muting?max_results=1000"],
+  ["x_blocks", {}, "/2/users/1/blocking?max_results=20"],
+  ["x_trends", {}, "/2/users/personalized_trends?"],
+  ["x_trends", { woeid: 1, limit: 3 }, "/2/trends/by/woeid/1?max_trends=3"],
+  ["x_dm_list", { limit: 2 }, "/2/dm_events?max_results=2"],
+  ["x_dm_read", { handle: "alice" }, "/2/dm_conversations/with/9/dm_events?max_results=20"],
+];
+
 describe("read tools reach the endpoint of their command", () => {
-  it.each([
-    ["x_me", {}, "/2/users/me"],
-    ["x_timeline", { limit: 5, next: "tok", full: true }, "/2/users/1/tweets?max_results=5&pagination_token=tok"],
-    ["x_mentions", { limit: 7 }, "/2/users/1/mentions?max_results=7"],
-    ["x_replies", { post: "https://x.com/alice/status/50", limit: 10 }, `/2/tweets/search/recent?query=${encodeURIComponent("conversation_id:50")}&max_results=10`],
-    ["x_view", { post: "50" }, "/2/tweets/50?"],
-    ["x_search", { query: "from:alice -is:retweet", limit: 12 }, `/2/tweets/search/recent?query=${encodeURIComponent("from:alice -is:retweet")}&max_results=12`],
-    ["x_user", { handle: "@alice" }, "/2/users/by/username/alice?"],
-    ["x_following", { limit: 1 }, "/2/users/1/following?max_results=1"],
-    ["x_followers", { handle: "alice", limit: 2 }, "/2/users/9/followers?max_results=2"],
-    ["x_likes", { handle: "alice", limit: 5 }, "/2/users/9/liked_tweets?max_results=5"],
-    ["x_bookmarks", { limit: 3 }, "/2/users/1/bookmarks?max_results=3"],
-    ["x_lists", { limit: 4 }, "/2/users/1/owned_lists?max_results=4"],
-    ["x_list_view", { list: "https://x.com/i/lists/77", limit: 6 }, "/2/lists/77/tweets?max_results=6"],
-    ["x_list_members", { list: "77", next: "abc" }, "/2/lists/77/members?max_results=20&pagination_token=abc"],
-    ["x_mutes", { limit: 1000 }, "/2/users/1/muting?max_results=1000"],
-    ["x_blocks", {}, "/2/users/1/blocking?max_results=20"],
-    ["x_trends", {}, "/2/users/personalized_trends?"],
-    ["x_trends", { woeid: 1, limit: 3 }, "/2/trends/by/woeid/1?max_trends=3"],
-    ["x_dm_list", { limit: 2 }, "/2/dm_events?max_results=2"],
-    ["x_dm_read", { handle: "alice" }, "/2/dm_conversations/with/9/dm_events?max_results=20"],
-  ])("%s %j", async (name, args, path) => {
+  it.each(READ_CASES)("%s %j", async (name, args, path) => {
     const { s, calls, approvals } = await session();
     const result = await s.call(name, args);
     expect(result.isError, textOf(result)).toBeFalsy();
@@ -174,29 +176,31 @@ describe("read tools reach the endpoint of their command", () => {
   });
 });
 
+const WRITE_CASES: [string, Record<string, unknown>, Omit<Call, "body"> & { body?: Json }][] = [
+  ["x_post", { text: "hello" }, { method: "POST", path: "/2/tweets", body: { text: "hello" } }],
+  ["x_post", { text: "--not a flag" }, { method: "POST", path: "/2/tweets", body: { text: "--not a flag" } }],
+  ["x_post", { text: "Pick one", poll_options: ["yes", "no", "maybe"], poll_minutes: 60 }, { method: "POST", path: "/2/tweets", body: { text: "Pick one", poll: { options: ["yes", "no", "maybe"], duration_minutes: 60 } } }],
+  ["x_reply", { post: "50", text: "my reply" }, { method: "POST", path: "/2/tweets", body: { text: "my reply", reply: { in_reply_to_tweet_id: "50" } } }],
+  ["x_delete", { post: "50" }, { method: "DELETE", path: "/2/tweets/50" }],
+  ["x_hide", { post: "50" }, { method: "PUT", path: "/2/tweets/50/hidden", body: { hidden: true } }],
+  ["x_unhide", { post: "50" }, { method: "PUT", path: "/2/tweets/50/hidden", body: { hidden: false } }],
+  ["x_repost", { post: "50" }, { method: "POST", path: "/2/users/1/retweets", body: { tweet_id: "50" } }],
+  ["x_unrepost", { post: "50" }, { method: "DELETE", path: "/2/users/1/retweets/50" }],
+  ["x_follow", { handle: "alice" }, { method: "POST", path: "/2/users/1/following", body: { target_user_id: "9" } }],
+  ["x_unfollow", { handle: "alice" }, { method: "DELETE", path: "/2/users/1/following/9" }],
+  ["x_bookmark", { post: "50" }, { method: "POST", path: "/2/users/1/bookmarks", body: { tweet_id: "50" } }],
+  ["x_unbookmark", { post: "50" }, { method: "DELETE", path: "/2/users/1/bookmarks/50" }],
+  ["x_list_create", { name: "Friends", description: "close ones", private: true }, { method: "POST", path: "/2/lists", body: { name: "Friends", description: "close ones", private: true } }],
+  ["x_list_delete", { list: "77" }, { method: "DELETE", path: "/2/lists/77" }],
+  ["x_list_add", { list: "77", handle: "alice" }, { method: "POST", path: "/2/lists/77/members", body: { user_id: "9" } }],
+  ["x_list_remove", { list: "77", handle: "alice" }, { method: "DELETE", path: "/2/lists/77/members/9" }],
+  ["x_mute", { handle: "alice" }, { method: "POST", path: "/2/users/1/muting", body: { target_user_id: "9" } }],
+  ["x_unmute", { handle: "alice" }, { method: "DELETE", path: "/2/users/1/muting/9" }],
+  ["x_dm_send", { handle: "alice", text: "hi there" }, { method: "POST", path: "/2/dm_conversations/with/9/messages", body: { text: "hi there" } }],
+];
+
 describe("write tools send what their command sends, only after approval", () => {
-  const cases: [string, Record<string, unknown>, Omit<Call, "body"> & { body?: Json }][] = [
-    ["x_post", { text: "hello" }, { method: "POST", path: "/2/tweets", body: { text: "hello" } }],
-    ["x_post", { text: "--not a flag" }, { method: "POST", path: "/2/tweets", body: { text: "--not a flag" } }],
-    ["x_post", { text: "Pick one", poll_options: ["yes", "no", "maybe"], poll_minutes: 60 }, { method: "POST", path: "/2/tweets", body: { text: "Pick one", poll: { options: ["yes", "no", "maybe"], duration_minutes: 60 } } }],
-    ["x_reply", { post: "50", text: "my reply" }, { method: "POST", path: "/2/tweets", body: { text: "my reply", reply: { in_reply_to_tweet_id: "50" } } }],
-    ["x_delete", { post: "50" }, { method: "DELETE", path: "/2/tweets/50" }],
-    ["x_hide", { post: "50" }, { method: "PUT", path: "/2/tweets/50/hidden", body: { hidden: true } }],
-    ["x_unhide", { post: "50" }, { method: "PUT", path: "/2/tweets/50/hidden", body: { hidden: false } }],
-    ["x_repost", { post: "50" }, { method: "POST", path: "/2/users/1/retweets", body: { tweet_id: "50" } }],
-    ["x_unrepost", { post: "50" }, { method: "DELETE", path: "/2/users/1/retweets/50" }],
-    ["x_follow", { handle: "alice" }, { method: "POST", path: "/2/users/1/following", body: { target_user_id: "9" } }],
-    ["x_unfollow", { handle: "alice" }, { method: "DELETE", path: "/2/users/1/following/9" }],
-    ["x_bookmark", { post: "50" }, { method: "POST", path: "/2/users/1/bookmarks", body: { tweet_id: "50" } }],
-    ["x_unbookmark", { post: "50" }, { method: "DELETE", path: "/2/users/1/bookmarks/50" }],
-    ["x_list_create", { name: "Friends", description: "close ones", private: true }, { method: "POST", path: "/2/lists", body: { name: "Friends", description: "close ones", private: true } }],
-    ["x_list_delete", { list: "77" }, { method: "DELETE", path: "/2/lists/77" }],
-    ["x_list_add", { list: "77", handle: "alice" }, { method: "POST", path: "/2/lists/77/members", body: { user_id: "9" } }],
-    ["x_list_remove", { list: "77", handle: "alice" }, { method: "DELETE", path: "/2/lists/77/members/9" }],
-    ["x_mute", { handle: "alice" }, { method: "POST", path: "/2/users/1/muting", body: { target_user_id: "9" } }],
-    ["x_unmute", { handle: "alice" }, { method: "DELETE", path: "/2/users/1/muting/9" }],
-    ["x_dm_send", { handle: "alice", text: "hi there" }, { method: "POST", path: "/2/dm_conversations/with/9/messages", body: { text: "hi there" } }],
-  ];
+  const cases = WRITE_CASES;
 
   it.each(cases)("%s %j", async (name, args, expected) => {
     const { s, writes, approvals } = await session();
@@ -243,6 +247,33 @@ describe("write tools send what their command sends, only after approval", () =>
     expect(result.isError).toBe(true);
     expect(decoded(result)).toMatchObject({ code: "NOT_APPROVED" });
     expect(writes()).toEqual([]);
+  });
+});
+
+// Results carry the commands' CLI help, so the server's instructions tell a client how to read it as tools:
+// `x-axi list view` is x_list_view, and --max-spend is max_spend. These hold that rule true for every tool.
+describe("each tool is named for its command, and each flag it passes for an argument", () => {
+  const FLAG_ARGUMENTS: Record<string, string> = { "--poll": "poll_options" };
+  const samples = new Map<string, Record<string, unknown>>([
+    ...READ_CASES.map(([name, args]): [string, Record<string, unknown>] => [name, args]),
+    ...WRITE_CASES.map(([name, args]): [string, Record<string, unknown>] => [name, { ...args, dry_run: true }]),
+    ["x_thread", { parts: ["one", "two"], dry_run: true }],
+    ["x_spend", {}],
+    ["x_auth_status", {}],
+  ]);
+
+  it("has a sample call for every tool", () => {
+    expect([...samples.keys()].sort()).toEqual(Object.keys(TOOLS).sort());
+  });
+
+  it.each(Object.keys(TOOLS))("%s", (name) => {
+    const { argv } = TOOLS[name]!.parse(samples.get(name));
+    const words = name.slice("x_".length).split("_");
+    expect(argv.slice(0, words.length)).toEqual(words);
+    const end = argv.indexOf("--");
+    const flags = (end === -1 ? argv : argv.slice(0, end)).filter((token) => token.startsWith("--"));
+    const advertised = Object.keys(TOOLS[name]!.input.shape);
+    for (const flag of flags) expect(advertised).toContain(FLAG_ARGUMENTS[flag] ?? flag.slice(2).replaceAll("-", "_"));
   });
 });
 
