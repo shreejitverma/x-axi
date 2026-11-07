@@ -254,26 +254,71 @@ describe("write tools send what their command sends, only after approval", () =>
 // `x-axi list view` is x_list_view, and --max-spend is max_spend. These hold that rule true for every tool.
 describe("each tool is named for its command, and each flag it passes for an argument", () => {
   const FLAG_ARGUMENTS: Record<string, string> = { "--poll": "poll_options" };
-  const samples = new Map<string, Record<string, unknown>>([
-    ...READ_CASES.map(([name, args]): [string, Record<string, unknown>] => [name, args]),
-    ...WRITE_CASES.map(([name, args]): [string, Record<string, unknown>] => [name, { ...args, dry_run: true }]),
-    ["x_thread", { parts: ["one", "two"], dry_run: true }],
-    ["x_spend", {}],
-    ["x_auth_status", {}],
-  ]);
+  // Every argument each tool advertises, with values distinct enough that one cannot stand in for another in argv.
+  // These are only parsed, never run, so x_post may combine arguments its command would refuse together.
+  const page = { limit: 10, next: "tok", full: true };
+  const SAMPLES: Record<string, Record<string, unknown>> = {
+    x_me: {},
+    x_timeline: { ...page },
+    x_mentions: { ...page },
+    x_replies: { post: "501", ...page },
+    x_view: { post: "501", full: true },
+    x_search: { query: "from:alice", ...page },
+    x_user: { handle: "alice" },
+    x_following: { handle: "alice", limit: 10, next: "tok", max_spend: 2.5 },
+    x_followers: { handle: "alice", limit: 10, next: "tok", max_spend: 2.5 },
+    x_likes: { handle: "alice", ...page },
+    x_bookmarks: { ...page },
+    x_lists: { handle: "alice", limit: 10, next: "tok" },
+    x_list_view: { list: "77", ...page },
+    x_list_members: { list: "77", limit: 10, next: "tok" },
+    x_mutes: { limit: 10, next: "tok" },
+    x_blocks: { limit: 10, next: "tok" },
+    x_trends: { woeid: 1, limit: 10 },
+    x_dm_list: { ...page },
+    x_dm_read: { handle: "alice", ...page },
+    x_spend: {},
+    x_auth_status: {},
+    x_post: { text: "hello", quote: "502", media: "/tmp/photo.png", poll_options: ["yes", "no"], poll_minutes: 60, dry_run: true },
+    x_reply: { post: "501", text: "my reply", media: "/tmp/photo.png", dry_run: true },
+    x_thread: { parts: ["one", "two"], dry_run: true },
+    x_delete: { post: "501", dry_run: true },
+    x_hide: { post: "501", dry_run: true },
+    x_unhide: { post: "501", dry_run: true },
+    x_repost: { post: "501", dry_run: true },
+    x_unrepost: { post: "501", dry_run: true },
+    x_follow: { handle: "alice", dry_run: true },
+    x_unfollow: { handle: "alice", dry_run: true },
+    x_bookmark: { post: "501", dry_run: true },
+    x_unbookmark: { post: "501", dry_run: true },
+    x_list_create: { name: "Friends", description: "close ones", private: true, dry_run: true },
+    x_list_delete: { list: "77", dry_run: true },
+    x_list_add: { list: "77", handle: "alice", dry_run: true },
+    x_list_remove: { list: "77", handle: "alice", dry_run: true },
+    x_mute: { handle: "alice", dry_run: true },
+    x_unmute: { handle: "alice", dry_run: true },
+    x_dm_send: { handle: "alice", text: "hi there", dry_run: true },
+  };
 
   it("has a sample call for every tool", () => {
-    expect([...samples.keys()].sort()).toEqual(Object.keys(TOOLS).sort());
+    expect(Object.keys(SAMPLES).sort()).toEqual(Object.keys(TOOLS).sort());
   });
 
   it.each(Object.keys(TOOLS))("%s", (name) => {
-    const { argv } = TOOLS[name]!.parse(samples.get(name));
+    const sample = SAMPLES[name]!;
+    const advertised = Object.keys(TOOLS[name]!.input.shape).sort();
+    expect(Object.keys(sample).sort(), "the sample sets every advertised argument").toEqual(advertised);
+    const { argv } = TOOLS[name]!.parse(sample);
     const words = name.slice("x_".length).split("_");
     expect(argv.slice(0, words.length)).toEqual(words);
     const end = argv.indexOf("--");
-    const flags = (end === -1 ? argv : argv.slice(0, end)).filter((token) => token.startsWith("--"));
-    const advertised = Object.keys(TOOLS[name]!.input.shape);
-    for (const flag of flags) expect(advertised).toContain(FLAG_ARGUMENTS[flag] ?? flag.slice(2).replaceAll("-", "_"));
+    const flagged = (end === -1 ? argv : argv.slice(0, end)).filter((token) => token.startsWith("--")).map((flag) => FLAG_ARGUMENTS[flag] ?? flag.slice(2).replaceAll("-", "_"));
+    for (const argument of flagged) expect(advertised).toContain(argument);
+    const rest = argv.slice(words.length);
+    for (const argument of advertised.filter((key) => key !== "dry_run" && !flagged.includes(key))) {
+      const value = sample[argument];
+      for (const item of Array.isArray(value) ? value : [value]) expect(rest, `${argument} reaches argv`).toContain(String(item));
+    }
   });
 });
 
