@@ -67,7 +67,7 @@ X can lock accounts for aggressive following, even well under its documented 400
 To continue a queue, run the exact command its help gives, which keeps the user's pacing flags.
 On `ACCOUNT_LOCKED`, stop all writes and tell the user to log in at https://x.com to unlock; only they can.
 `follow-file` counts an account as already followed only if this login followed it through x-axi.
-It skips, and reports under `unavailable`, an account X refuses and then reports deleted, suspended, or restricted; every other error stops the run.
+It skips, and reports under `unavailable`, an account whose follow X refuses as invalid (400) or not found (404) and then reports deleted, suspended, or restricted; every other error stops the run.
 Build every queue with `x-axi follow-plan <handle> --out queue.json`, which removes accounts the user already follows and holds protected accounts out, or those accounts are followed and billed again.
 Never filter a queue by hand or call the following endpoints another way to build one.
 A `following --all --out` export is unfiltered, so never pass one to `follow-file`.

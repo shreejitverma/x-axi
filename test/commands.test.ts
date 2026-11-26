@@ -952,7 +952,7 @@ describe("follow-file", () => {
       expect(Object.keys(logged().following).sort()).toEqual(["100", "102"]);
       // A skip is not a follow, so it uses no room under the cap.
       expect(logged().events).toHaveLength(2);
-      await expect(h.commands["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { remaining: 0, status: expect.stringContaining("found unavailable") } });
+      await expect(h.commands["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { followed: 0, skipped: 0, remaining: 0, status: expect.stringContaining("found unavailable") } });
       expect(h.writes()).toHaveLength(3);
     });
 
@@ -1099,7 +1099,7 @@ describe("follow log", () => {
   it("reports an empty queue as empty, with no API call", async () => {
     const h = harness(social);
     await expect(h.commands["follow-file"]!([queueFile([])])).resolves.toMatchObject({
-      follow_file: { status: "the file lists no accounts (no-op)" },
+      follow_file: { followed: 0, skipped: 0, remaining: 0, status: "the file lists no accounts (no-op)" },
     });
     expect(h.calls).toEqual([]);
   });

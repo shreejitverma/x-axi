@@ -233,7 +233,7 @@ export const HELP: Record<string, string> = {
   unrepost: "usage: x-axi unrepost <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. The cost is unknown, as for `repost`.",
   follow: "usage: x-axi follow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.015.",
   unfollow: "usage: x-axi unfollow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.01.",
-  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. The one exception is an account X refuses as invalid and then reports deleted, suspended, or restricted (up to $0.02 in lookups): it is listed under unavailable, skipped, and never tried again. Rerun to continue; the first follow of a run waits out what is left of one wait since the last follow. Skips only accounts this login followed or found unavailable through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
+  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. The one exception is an account X refuses as invalid or not found and then reports deleted, suspended, or restricted (up to $0.02 in lookups): it is listed under unavailable, skipped, and never tried again. Rerun to continue; the first follow of a run waits out what is left of one wait since the last follow. Skips only accounts this login followed or found unavailable through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
   bookmarks: "usage: x-axi bookmarks [--limit 1-100] [--next TOKEN] [--full]\nYour bookmarked posts. About $0.001 per post at the Owned Read rate when you own the app, plus $0.01 per author. Needs the bookmark.read scope.",
   bookmark: "usage: x-axi bookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then bookmarks it. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
   unbookmark: "usage: x-axi unbookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then removes the bookmark. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
@@ -1440,12 +1440,12 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       const intervalMs = intFlag("--interval", FOLLOW_INTERVAL_DEFAULT_S, FOLLOW_INTERVAL_MIN_S, FOLLOW_INTERVAL_MAX_S) * 1000;
       const random = deps.random ?? Math.random;
       const queue = parseFollowQueue(file);
-      if (!queue.length) return { follow_file: { followed: 0, remaining: 0, status: "the file lists no accounts (no-op)" } };
+      if (!queue.length) return { follow_file: { followed: 0, skipped: 0, remaining: 0, status: "the file lists no accounts (no-op)" } };
       const account = await refreshAccount();
       const log = readFollows(account.id);
       const remaining = queue.filter((u) => !log.following[u.id] && !log.unavailable?.[u.id]);
       if (!remaining.length) {
-        return { follow_file: { followed: 0, remaining: 0, status: "every account in this file is already followed through x-axi or was found unavailable (no-op)" } };
+        return { follow_file: { followed: 0, skipped: 0, remaining: 0, status: "every account in this file is already followed through x-axi or was found unavailable (no-op)" } };
       }
       const recent = recentFollows(log.events);
       const room = dailyCap - recent.length;
