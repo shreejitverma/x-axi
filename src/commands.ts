@@ -5,7 +5,7 @@ import { displayText, onePositional, parseArgs, parseHandle, parseLimit, parseLi
 import type { AuthService } from "./auth.js";
 import { configPath, DEFAULT_REDIRECT_URI, parseClientId, readConfig, writeConfig } from "./config.js";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { assertFollowLogReadable, clearAccount, DAY_MS, logFollow, logFollowAttempt, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
+import { assertFollowLogReadable, clearAccount, DAY_MS, logFollow, logFollowAttempt, logUnavailable, logUnfollow, readAccount, readFollows, recordSpend, summarizeSpend, writeAccount, type Account } from "./ledger.js";
 import { chunkCount, describeMedia, inspectMedia, MEDIA_CHUNK_BYTES, readChunks, type MediaFile } from "./media.js";
 import { SCOPES } from "./oauth.js";
 import { DEFAULT_SPEND_CAP_USD, estimatePostCost, RATES } from "./rates.js";
@@ -233,7 +233,7 @@ export const HELP: Record<string, string> = {
   unrepost: "usage: x-axi unrepost <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post. The cost is unknown, as for `repost`.",
   follow: "usage: x-axi follow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.015.",
   unfollow: "usage: x-axi unfollow <handle> [--dry-run]\nOpens an approval dialog. Costs about $0.01.",
-  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. Rerun to continue; the first follow of a run waits out what is left of one wait since the last follow. Skips only accounts this login followed through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
+  "follow-file": "usage: x-axi follow-file <file.json> [--max 1-400] [--daily-cap 1-400] [--interval 20-3600] [--dry-run]\nFollows the next accounts from a JSON array of {id, username}, after one approval for the whole batch. Defaults: 50 per run, at most 100 in any 24 hours (--daily-cap, up to X's 400), and 60 seconds between follows (--interval, at least 20) stretched by up to half again at random. X documents 400 a day and 50 per 15 minutes, but it has locked accounts following well under that, so raise these only knowingly. Stops at the first error, and a locked account stops with ACCOUNT_LOCKED. The one exception is an account X refuses as invalid and then reports deleted, suspended, or restricted (up to $0.02 in lookups): it is listed under unavailable, skipped, and never tried again. Rerun to continue; the first follow of a run waits out what is left of one wait since the last follow. Skips only accounts this login followed or found unavailable through x-axi; build the file with `x-axi follow-plan` so accounts you already follow are not in it. Usernames are shown as the file gives them.",
   bookmarks: "usage: x-axi bookmarks [--limit 1-100] [--next TOKEN] [--full]\nYour bookmarked posts. About $0.001 per post at the Owned Read rate when you own the app, plus $0.01 per author. Needs the bookmark.read scope.",
   bookmark: "usage: x-axi bookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then bookmarks it. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
   unbookmark: "usage: x-axi unbookmark <post-id-or-url> [--dry-run]\nOpens an approval dialog showing the post, then removes the bookmark. Costs about $0.005, plus the post read. Needs the bookmark.write scope.",
@@ -456,6 +456,36 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     } catch (error) {
       if (error instanceof AxiError && error.code === "OUTCOME_UNKNOWN") persistFollowLog(() => logFollowAttempt(account.id));
       throw error;
+    }
+  };
+
+  /**
+   * After X refuses a follow as invalid, tells an account that cannot be followed from one that can.
+   * Returns why the account is unavailable, or no reason when it looks followable or the check itself fails, so the refusal stands.
+   * Seen live on 2026-11-26: following a restricted account returned 400, GET /2/users/<id> returned its profile with zero
+   * follow counts, and GET /2/users/by/username/<that username> said not found.
+   */
+  const whyUnavailable = async (target: Account): Promise<{ reason?: string; usd: number }> => {
+    const missing = (response: ApiResponse): boolean =>
+      response.status === 404 || (response.status < 300 && !response.body["data"] && saysNotFound(response.body));
+    let usd = 0;
+    try {
+      const byId = await read(deps, `/2/users/${target.id}`);
+      if (missing(byId)) return { reason: "X has no user with this ID, so the account was deleted or deactivated", usd };
+      const username = (byId.body["data"] as Json | undefined)?.["username"];
+      if (byId.status >= 300 || typeof username !== "string") return { usd };
+      spend("user", RATES.userRead);
+      usd += RATES.userRead;
+      const byName = await read(deps, `/2/users/by/username/${encodeURIComponent(username)}`);
+      if (missing(byName)) return { reason: `X finds no user named @${username}, so the account is suspended or restricted`, usd };
+      if (byName.status < 300 && byName.body["data"]) {
+        spend("user", RATES.userRead);
+        usd += RATES.userRead;
+      }
+      return { usd };
+    } catch {
+      // read throws only AxiError for a failed request; the caller then stops on the original refusal, so nothing is hidden.
+      return { usd };
     }
   };
 
@@ -1413,8 +1443,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       if (!queue.length) return { follow_file: { followed: 0, remaining: 0, status: "the file lists no accounts (no-op)" } };
       const account = await refreshAccount();
       const log = readFollows(account.id);
-      const remaining = queue.filter((u) => !log.following[u.id]);
-      if (!remaining.length) return { follow_file: { followed: 0, remaining: 0, status: "every account in this file is already followed through x-axi (no-op)" } };
+      const remaining = queue.filter((u) => !log.following[u.id] && !log.unavailable?.[u.id]);
+      if (!remaining.length) {
+        return { follow_file: { followed: 0, remaining: 0, status: "every account in this file is already followed through x-axi or was found unavailable (no-op)" } };
+      }
       const recent = recentFollows(log.events);
       const room = dailyCap - recent.length;
       if (room <= 0) {
@@ -1442,6 +1474,8 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       let requested = 0;
       let stopped: Output | undefined;
       let stoppedHelp: string[] = [];
+      const unavailable: Output[] = [];
+      let lookupUsd = 0;
       for (const [index, user] of batch.entries()) {
         const wait = index > 0 ? jitteredWait() : leftOf(jitteredWait());
         if (wait > 0) await pause(wait);
@@ -1451,6 +1485,17 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
           else followed += 1;
         } catch (error) {
           if (!(error instanceof AxiError)) throw error;
+          // X answers a follow of a deleted, suspended, or restricted account with 400, which is also how it answers a bad request,
+          // so the account itself is looked up before the run skips it; any other refusal, or a lookup that finds it, stops the run.
+          if (error.code === "VALIDATION_ERROR" || error.code === "NOT_FOUND") {
+            const check = await whyUnavailable(user);
+            lookupUsd += check.usd;
+            if (check.reason) {
+              unavailable.push({ handle: `@${user.username}`, id: user.id, reason: check.reason });
+              persistFollowLog(() => logUnavailable(account.id, user.id));
+              continue;
+            }
+          }
           stopped = { at: `@${user.username}`, code: error.code, reason: error.message };
           stoppedHelp = error.suggestions;
           break;
@@ -1465,7 +1510,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       }
       const done = followed + requested;
       const billable = done + (stopped?.["code"] === "OUTCOME_UNKNOWN" ? 1 : 0);
-      const left = remaining.length - done;
+      const left = remaining.length - done - unavailable.length;
       const pacingFlags = (["--daily-cap", "--interval"] as const)
         .filter((flag) => parsed.flags.has(flag))
         .map((flag) => ` ${flag} ${{ "--daily-cap": dailyCap, "--interval": intervalMs / 1000 }[flag]}`)
@@ -1477,9 +1522,10 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
       else if (left > 0 && stillRecent.length < dailyCap) help = [`${again} to continue; ${counted(dailyCap - stillRecent.length, "follow")} left under the ${dailyCap} per 24 hours cap`];
       else if (left > 0) help = [`${again} after ${capReopensAt(stillRecent, dailyCap)} to continue`];
       return {
-        follow_file: { followed, requested, remaining: left, status: stopped ? "stopped early" : "batch complete" },
+        follow_file: { followed, requested, skipped: unavailable.length, remaining: left, status: stopped ? "stopped early" : "batch complete" },
         ...(stopped ? { stopped } : {}),
-        est_cost: money(billable * RATES.userInteraction),
+        ...(unavailable.length ? { unavailable } : {}),
+        est_cost: money(billable * RATES.userInteraction + lookupUsd),
         ...(help.length ? { help } : {}),
       };
     },

@@ -924,6 +924,73 @@ describe("follow-file", () => {
     expect(out).toMatchObject({ follow_file: { followed: 1, remaining: 2, status: "stopped early" }, stopped: { at: "@user1", code: "ACCOUNT_LOCKED" } });
     expect(out.help.join(" ")).toContain("https://x.com");
     expect(h.writes()).toHaveLength(2);
+    // A 403 is never a reason to look the account up and skip it.
+    expect(h.calls.filter((c) => c.method === "GET" && c.path !== "/2/users/me")).toEqual([]);
+  });
+
+  describe("an account X refuses as invalid", () => {
+    // The 400 X returned on 2026-11-26 when following a restricted account.
+    const INVALID = ok({ detail: "One or more parameters to your request was invalid.", title: "Invalid Request" }, 400);
+    const notFound = (what: string) => ok({ errors: [{ detail: `Could not find user with ${what}.`, title: "Not Found Error", type: "https://api.twitter.com/2/problems/resource-not-found" }] });
+    const user1 = ok({ data: { id: "101", name: "one", username: "user1" } });
+    const refusing = (lookup: (c: Call) => ApiResponse) => (c: Call) =>
+      c.method === "POST" ? (c.body?.["target_user_id"] === "101" ? INVALID : followOk()) : lookup(c);
+    const logged = () => (JSON.parse(readFileSync(join(dir, "follows.json"), "utf8")) as { accounts: Record<string, { following: Json; events: string[]; unavailable?: Json }> }).accounts["1"]!;
+
+    it("skips a deleted account, keeps the pace, and never tries it again", async () => {
+      const file = queue(3);
+      const h = run(refusing((c) => (c.path === "/2/users/101" ? notFound("id: [101]") : user1)));
+      await expect(h.commands["follow-file"]!([file])).resolves.toEqual({
+        follow_file: { followed: 2, requested: 0, skipped: 1, remaining: 0, status: "batch complete" },
+        unavailable: [{ handle: "@user1", id: "101", reason: "X has no user with this ID, so the account was deleted or deactivated" }],
+        est_cost: "$0.030",
+      });
+      expect(h.sleeps).toEqual([60_000, 60_000]);
+      // One lookup by ID; a not-found answer gives no username to look up next.
+      expect(h.calls.filter((c) => c.method === "GET" && c.path !== "/2/users/me").map((c) => c.path)).toEqual(["/2/users/101"]);
+      expect(Object.keys(logged().unavailable!)).toEqual(["101"]);
+      expect(Object.keys(logged().following).sort()).toEqual(["100", "102"]);
+      // A skip is not a follow, so it uses no room under the cap.
+      expect(logged().events).toHaveLength(2);
+      await expect(h.commands["follow-file"]!([file])).resolves.toMatchObject({ follow_file: { remaining: 0, status: expect.stringContaining("found unavailable") } });
+      expect(h.writes()).toHaveLength(3);
+    });
+
+    it("skips a suspended or restricted account whose username X cannot find", async () => {
+      const h = run(refusing((c) => (c.path === "/2/users/101" ? user1 : notFound("username: [user1]"))));
+      const out = (await h.commands["follow-file"]!([queue(3)])) as { unavailable: Json[]; est_cost: string };
+      expect(out).toMatchObject({ follow_file: { followed: 2, skipped: 1, remaining: 0 } });
+      expect(out.unavailable).toEqual([{ handle: "@user1", id: "101", reason: "X finds no user named @user1, so the account is suspended or restricted" }]);
+      expect(h.calls.filter((c) => c.method === "GET" && c.path !== "/2/users/me").map((c) => c.path)).toEqual(["/2/users/101", "/2/users/by/username/user1"]);
+      // Two follows and the one lookup that returned a user.
+      expect(out.est_cost).toBe("$0.040");
+    });
+
+    it("stops as before when the refused account looks followable", async () => {
+      const h = run(refusing(() => user1));
+      const out = (await h.commands["follow-file"]!([queue(3)])) as Json;
+      expect(out).toMatchObject({
+        follow_file: { followed: 1, skipped: 0, remaining: 2, status: "stopped early" },
+        stopped: { at: "@user1", code: "VALIDATION_ERROR" },
+        est_cost: "$0.035",
+      });
+      expect(out["unavailable"]).toBeUndefined();
+      expect(logged().unavailable).toBeUndefined();
+      expect(h.writes()).toHaveLength(2);
+    });
+
+    it.each([
+      ["X fails the lookup", () => ok({ title: "Service Unavailable" }, 503)],
+      ["the lookup request throws", () => { throw new Error("socket hang up"); }],
+      ["X returns neither a user nor not found", () => ok({ errors: [{ title: "Forbidden", detail: "Sorry, you are not authorized" }] })],
+    ])("stops on the original refusal when %s", async (_name, lookup) => {
+      const h = run(refusing(lookup));
+      await expect(h.commands["follow-file"]!([queue(3)])).resolves.toMatchObject({
+        follow_file: { followed: 1, skipped: 0, remaining: 2, status: "stopped early" },
+        stopped: { at: "@user1", code: "VALIDATION_ERROR", reason: expect.stringContaining("One or more parameters") },
+      });
+      expect(h.writes()).toHaveLength(2);
+    });
   });
 
   it("sends nothing when the batch is not approved", async () => {

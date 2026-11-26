@@ -197,7 +197,7 @@ It sends nothing to X and asks for no approval, because it only reads.
 - If X lists fewer of your follows than its own count, or reports partial errors on the other account's list, the queue is still written and the output carries a warning.
 
 The queue is correct when it is built.
-Follows you make elsewhere afterwards are not in it, and `follow-file` skips only accounts this login followed through x-axi.
+Follows you make elsewhere afterwards are not in it, and `follow-file` skips only accounts this login followed, or found unavailable, through x-axi.
 
 ### Threads
 
@@ -445,6 +445,10 @@ Checked on 2026-11-03 against the [changelog](https://docs.x.com/changelog), [pr
   The first follow of a run waits out what is left of one such wait since the newest logged follow, so a quick rerun keeps the gap; the dry run shows the longest that wait can be as `pacing.first_wait_s`.
   The continue hint repeats any `--daily-cap` and `--interval` you passed, so following it keeps your pace.
   It asks once per batch, and stops at the first error; a locked account stops with `ACCOUNT_LOCKED`, which only logging in at <https://x.com> and following X's unlock steps clears.
+  The one error it does not stop at is a follow X refuses as invalid (400) for an account it then reports deleted, suspended, or restricted.
+  X answers a bad request with the same 400, so `follow-file` first looks the account up by ID, and then by the username X returns, for up to $0.02.
+  If X has no user with that ID, or cannot find that username, the account is listed under `unavailable`, recorded in the follow log, and skipped on every later run; otherwise the run stops as before.
+  On 2026-11-26 a restricted account answered exactly that way: its ID returned a profile with zero follow counts, while its username was not found.
   After a lock, wait at least a day and resume more slowly, for example `--daily-cap 50 --interval 90`.
   Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.
 - `follow-file` treats an account as already followed only if the logged-in account followed it through x-axi, and it does not read X's following list, because each listed account is billed.

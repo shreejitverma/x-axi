@@ -113,6 +113,8 @@ export interface FollowRecord {
   following: Record<string, string>;
   /** The time of every follow in the last 24 hours, confirmed or with an unknown outcome. This is the rate history, so an unfollow keeps it. */
   events: string[];
+  /** Accounts X refused to follow and then reported deleted, suspended, or restricted, by user ID, so resume skips them. Older logs lack it. */
+  unavailable?: Record<string, string>;
 }
 
 interface FollowFile {
@@ -191,6 +193,15 @@ export function logFollow(accountId: string, targetId: string, now = new Date())
 export function logFollowAttempt(accountId: string, now = new Date()): void {
   const file = loadFollowFile();
   addFollowEvent(file, accountId, now);
+  saveFollowFile(file);
+}
+
+/** For an account that cannot be followed: no follow happened, so it adds no event and uses no room under the cap. */
+export function logUnavailable(accountId: string, targetId: string, now = new Date()): void {
+  const file = loadFollowFile();
+  const record = file.accounts[accountId] ?? { following: {}, events: [] };
+  record.unavailable = { ...record.unavailable, [targetId]: now.toISOString() };
+  file.accounts[accountId] = record;
   saveFollowFile(file);
 }
 
