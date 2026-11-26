@@ -966,6 +966,33 @@ describe("follow-file", () => {
       expect(out.est_cost).toBe("$0.040");
     });
 
+    // Seen live on 2026-11-26 for @pmx_trade: only this detail was visible, and its title is not a not-found one.
+    const unavailableById = ok({ errors: [{ detail: "User is unavailable: [101]." }] });
+
+    it("skips an account X reports unavailable by ID when its username is not found either", async () => {
+      const h = run(refusing((c) => (c.path === "/2/users/101" ? unavailableById : notFound("username: [user1]"))));
+      const out = (await h.commands["follow-file"]!([queue(3)])) as { unavailable: Json[]; est_cost: string };
+      expect(out).toMatchObject({ follow_file: { followed: 2, skipped: 1, remaining: 0, status: "batch complete" } });
+      expect(out.unavailable).toEqual([{
+        handle: "@user1",
+        id: "101",
+        reason: "X reports this ID as unavailable (User is unavailable: [101].), and finds no user named @user1, so the account is suspended or restricted",
+      }]);
+      // The username comes from the file, because X returned no profile to take it from.
+      expect(h.calls.filter((c) => c.method === "GET" && c.path !== "/2/users/me").map((c) => c.path)).toEqual(["/2/users/101", "/2/users/by/username/user1"]);
+      // Neither lookup returned a user, so only the two follows are counted.
+      expect(out.est_cost).toBe("$0.030");
+    });
+
+    it("stops when X reports the ID unavailable but finds the username", async () => {
+      const h = run(refusing((c) => (c.path === "/2/users/101" ? unavailableById : user1)));
+      await expect(h.commands["follow-file"]!([queue(3)])).resolves.toMatchObject({
+        follow_file: { followed: 1, skipped: 0, remaining: 2, status: "stopped early" },
+        stopped: { at: "@user1", code: "VALIDATION_ERROR" },
+      });
+      expect(h.writes()).toHaveLength(2);
+    });
+
     it("stops as before when the refused account looks followable", async () => {
       const h = run(refusing(() => user1));
       const out = (await h.commands["follow-file"]!([queue(3)])) as Json;

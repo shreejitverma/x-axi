@@ -462,8 +462,11 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   /**
    * After X refuses a follow as invalid or not found, tells an account that cannot be followed from one that can.
    * Returns why the account is unavailable, or no reason when it looks followable or the check itself fails, so the refusal stands.
-   * Seen live on 2026-11-26: following a restricted account returned 400, GET /2/users/<id> returned its profile with zero
-   * follow counts, and GET /2/users/by/username/<that username> said not found.
+   * Seen live, each time after following the account returned 400:
+   * - 2026-11-26, @vjxnu: GET /2/users/<id> returned its profile with zero follow counts, and its username was not found.
+   * - 2026-11-26, @pmx_trade: GET /2/users/<id> returned only an error, "User is unavailable: [<id>].", and its username was not found.
+   * The username check is what decides: an active account, renamed or not, returns its profile by ID, so the file's username
+   * is looked up only when X returns an error and no profile for the ID.
    */
   const whyUnavailable = async (target: Account): Promise<{ reason?: string; usd: number }> => {
     const missing = (response: ApiResponse): boolean =>
@@ -472,12 +475,26 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
     try {
       const byId = await read(deps, `/2/users/${target.id}`);
       if (missing(byId)) return { reason: "X has no user with this ID, so the account was deleted or deactivated", usd };
-      const username = (byId.body["data"] as Json | undefined)?.["username"];
-      if (byId.status >= 300 || typeof username !== "string") return { usd };
-      spend("user", RATES.userRead);
-      usd += RATES.userRead;
+      if (byId.status >= 300) return { usd };
+      const profile = byId.body["data"] as Json | undefined;
+      let username: string;
+      let refusal = "";
+      if (profile) {
+        if (typeof profile["username"] !== "string") return { usd };
+        username = profile["username"];
+        spend("user", RATES.userRead);
+        usd += RATES.userRead;
+      } else if (Array.isArray(byId.body["errors"])) {
+        username = target.username;
+        refusal = `X reports this ID as unavailable (${errorDetail(byId.body)}), and `;
+      } else {
+        return { usd };
+      }
       const byName = await read(deps, `/2/users/by/username/${encodeURIComponent(username)}`);
-      if (missing(byName)) return { reason: `X finds no user named @${username}, so the account is suspended or restricted`, usd };
+      if (missing(byName)) {
+        const finds = refusal ? "finds" : "X finds";
+        return { reason: `${refusal}${finds} no user named @${username}, so the account is suspended or restricted`, usd };
+      }
       if (byName.status < 300 && byName.body["data"]) {
         spend("user", RATES.userRead);
         usd += RATES.userRead;
