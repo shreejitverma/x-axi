@@ -460,7 +460,7 @@ export function buildCommands(deps: Deps): Record<string, (args: string[]) => Pr
   };
 
   /**
-   * After X refuses a follow as invalid, tells an account that cannot be followed from one that can.
+   * After X refuses a follow as invalid or not found, tells an account that cannot be followed from one that can.
    * Returns why the account is unavailable, or no reason when it looks followable or the check itself fails, so the refusal stands.
    * Seen live on 2026-11-26: following a restricted account returned 400, GET /2/users/<id> returned its profile with zero
    * follow counts, and GET /2/users/by/username/<that username> said not found.
