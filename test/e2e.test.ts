@@ -155,13 +155,13 @@ it("exports the following list through the binary and refuses to overwrite it", 
   expect(second.out).toContain("already exists");
 });
 
+// Eleven binary starts: run them together, and allow for a loaded machine, where one start can take seconds.
 it("documents the new commands in help", async () => {
-  const top = await run(["--help"]);
-  for (const name of ["following", "followers", "follow-plan", "thread", "repost", "--dry-run", "bookmarks", "unbookmark", "likes", "list create", "list remove", "mutes", "unmute", "blocks", "trends", "--poll"]) expect(top.out).toContain(name);
-  for (const [command, flag] of [["post", "--media"], ["post", "--quote"], ["post", "--poll-minutes"], ["follow-plan", "--max-spend"], ["following", "--all"], ["delete", "--dry-run"], ["list", "--private"], ["trends", "--woeid"], ["bookmark", "--dry-run"], ["mute", "--dry-run"]]) {
-    expect((await run([command as string, "--help"])).out).toContain(flag);
-  }
-});
+  const pairs = [["post", "--media"], ["post", "--quote"], ["post", "--poll-minutes"], ["follow-plan", "--max-spend"], ["following", "--all"], ["delete", "--dry-run"], ["list", "--private"], ["trends", "--woeid"], ["bookmark", "--dry-run"], ["mute", "--dry-run"]] as const;
+  const [top, ...each] = await Promise.all([run(["--help"]), ...pairs.map(([command]) => run([command, "--help"]))]);
+  for (const name of ["following", "followers", "follow-plan", "thread", "repost", "--dry-run", "bookmarks", "unbookmark", "likes", "list create", "list remove", "mutes", "unmute", "blocks", "trends", "--poll"]) expect(top!.out).toContain(name);
+  pairs.forEach(([, flag], i) => expect(each[i]!.out).toContain(flag));
+}, 30_000);
 
 it("reads bookmarks and trends through the binary as TOON, with definitive empty states", async () => {
   const bookmarks = await run(["bookmarks", "--limit", "1"]);
