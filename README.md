@@ -446,9 +446,10 @@ Checked on 2026-11-03 against the [changelog](https://docs.x.com/changelog), [pr
   The continue hint repeats any `--daily-cap` and `--interval` you passed, so following it keeps your pace.
   It asks once per batch, and stops at the first error; a locked account stops with `ACCOUNT_LOCKED`, which only logging in at <https://x.com> and following X's unlock steps clears.
   The one error it does not stop at is a follow X refuses as invalid (400) or not found (404) for an account it then reports deleted, suspended, or restricted.
-  X answers a bad request with the same 400, so on either error `follow-file` first looks the account up by ID, and then by the username X returns, for up to $0.02.
+  X answers a bad request with the same 400, so on either error `follow-file` first looks the account up by ID, and then by username, for up to $0.02.
+  The username is the one X returns for the ID, or the file's username when X returns only an error for the ID, since an active account, renamed or not, always returns its profile.
   If X has no user with that ID, or cannot find that username, the account is listed under `unavailable`, recorded in the follow log, and skipped on every later run; otherwise the run stops as before.
-  On 2026-11-26 a restricted account answered exactly that way: its ID returned a profile with zero follow counts, while its username was not found.
+  On 2026-11-26 two restricted accounts answered that way: one ID returned a profile with zero follow counts, another returned only "User is unavailable", and neither username was found.
   After a lock, wait at least a day and resume more slowly, for example `--daily-cap 50 --interval 90`.
   Unfollowing does not give back room under that cap, and a follow with an unknown outcome uses room because X may have applied it.
 - `follow-file` treats an account as already followed only if the logged-in account followed it through x-axi, and it does not read X's following list, because each listed account is billed.
